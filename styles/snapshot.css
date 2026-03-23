@@ -1,0 +1,44 @@
+/**
+ * snapshot.css
+ *
+ * Injected into every ESC page before a screenshot is taken via Playwright's
+ * native `toHaveScreenshot({ stylePath })` option in playwright.config.ts.
+ *
+ * Purpose: hide third-party fixed-position widgets that get duplicated in
+ * full-page captures. Playwright scrolls through the page in viewport-sized
+ * chunks — any element with `position: fixed` is re-painted at every scroll
+ * position, producing ghost images in the final screenshot.
+ *
+ * To find selectors: open DevTools → inspect a floating element →
+ * computed styles → confirm `position: fixed` → copy the selector here.
+ */
+
+/* ── Live chat widget (Zoho SalesIQ / similar) ───────────────────────────── */
+#zsiq_float,
+#zsiq_agtpic,
+.zsiq_theme1,
+[id^="zsiq"],
+[class^="zsiq"] {
+  display: none !important;
+}
+
+/* ── Feedback tab (left-side floating button) ────────────────────────────── */
+.feedbackify,
+.feedback-btn,
+[class*="feedback-tab"],
+[class*="feedbackTab"],
+[id*="feedback-tab"] {
+  display: none !important;
+}
+
+/* ── Google reCAPTCHA badge ──────────────────────────────────────────────── */
+.grecaptcha-badge {
+  display: none !important;
+}
+
+/* ── Cookie compliance bar (if not yet dismissed by preparePageForSnapshot) ─ */
+.eu-cookie-compliance-banner {
+  display: none !important;
+}
+
+/* ── Add additional selectors below as needed ────────────────────────────── */

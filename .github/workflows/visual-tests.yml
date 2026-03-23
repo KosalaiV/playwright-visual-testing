@@ -1,0 +1,189 @@
+name: Visual Regression Tests
+
+# ── How baselines work (Rolling — Option A) ───────────────────────────────────
+#
+#  Every run downloads the last passing build's screenshots as the baseline.
+#  • If tests pass  → current screenshots become the new baseline.
+#  • If tests fail  → baseline is NOT updated; previous baseline is retained.
+#  • First run (no baseline yet) → auto-captures initial baseline, no failure.
+#
+#  Environment is selected at run time. Cross-environment runs are supported —
+#  comparison is image vs image by filename, environment is logged for reference.
+# ─────────────────────────────────────────────────────────────────────────────
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment'
+        required: true
+        default: 'uat'
+        type: choice
+        options: [dev, test, uat, beta, prod]
+
+concurrency:
+  group: visual-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  TEST_ENV: ${{ github.event.inputs.environment || 'uat' }}
+
+jobs:
+  visual-tests:
+    name: "Visual Tests — ${{ github.event.inputs.environment || 'uat' }}"
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright browsers
+        run: npx playwright install chromium --with-deps
+
+      # ── Log execution details ─────────────────────────────────────────────────
+      - name: Log execution details
+        run: |
+          declare -A URLS=(
+            [dev]="https://drupal.dev.energysafetycanada.com"
+            [test]="https://drupal.test.energysafetycanada.com"
+            [uat]="https://drupal.uat.energysafetycanada.com"
+            [beta]="https://beta.energysafetycanada.com"
+            [prod]="https://energysafetycanada.com"
+          )
+          BASE_URL="${URLS[${{ env.TEST_ENV }}]}"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "  Environment : ${{ env.TEST_ENV }}"
+          echo "  Base URL    : $BASE_URL"
+          echo "  Run #       : ${{ github.run_number }}"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+      # ── Restore last passing baseline ─────────────────────────────────────────
+      # continue-on-error so a missing artifact (first run) doesn't block the job.
+      - name: Restore baseline artifact
+        uses: dawidd6/action-download-artifact@v6
+        continue-on-error: true
+        with:
+          name: visual-baseline
+          path: snapshots/
+          workflow: visual-tests.yml
+          workflow_conclusion: success
+          search_artifacts: true
+
+      # ── Run all tests ─────────────────────────────────────────────────────────
+      - name: Run visual tests
+        run: |
+          ENV="${{ env.TEST_ENV }}"
+
+          if [ -d "snapshots" ] && [ "$(ls -A snapshots 2>/dev/null)" ]; then
+            echo "▶ Baseline found — running comparison against [$ENV]"
+            npm run test:$ENV
+          else
+            echo "▶ No baseline found — capturing initial baseline against [$ENV] (first-run bootstrap)"
+            npm run baseline:$ENV
+          fi
+        env:
+          TEST_ENV:                  ${{ env.TEST_ENV }}
+          HTACCESS_USER:             ${{ secrets.HTACCESS_USER }}
+          HTACCESS_PASS:             ${{ secrets.HTACCESS_PASS }}
+          STUDENT_USERNAME:          ${{ secrets.STUDENT_USERNAME }}
+          STUDENT_PASSWORD:          ${{ secrets.STUDENT_PASSWORD }}
+          INSTRUCTOR_USERNAME:       ${{ secrets.INSTRUCTOR_USERNAME }}
+          INSTRUCTOR_PASSWORD:       ${{ secrets.INSTRUCTOR_PASSWORD }}
+          COMPANYADMIN_USERNAME:     ${{ secrets.COMPANYADMIN_USERNAME }}
+          COMPANYADMIN_PASSWORD:     ${{ secrets.COMPANYADMIN_PASSWORD }}
+          PROVIDER_USERNAME:         ${{ secrets.PROVIDER_USERNAME }}
+          PROVIDER_PASSWORD:         ${{ secrets.PROVIDER_PASSWORD }}
+          MULTIROLE_USERNAME:        ${{ secrets.MULTIROLE_USERNAME }}
+          MULTIROLE_PASSWORD:        ${{ secrets.MULTIROLE_PASSWORD }}
+          EVALUATOR_USERNAME:        ${{ secrets.EVALUATOR_USERNAME }}
+          EVALUATOR_PASSWORD:        ${{ secrets.EVALUATOR_PASSWORD }}
+          AUDITOR_USERNAME:          ${{ secrets.AUDITOR_USERNAME }}
+          AUDITOR_PASSWORD:          ${{ secrets.AUDITOR_PASSWORD }}
+          ASSESSOR_USERNAME:         ${{ secrets.ASSESSOR_USERNAME }}
+          ASSESSOR_PASSWORD:         ${{ secrets.ASSESSOR_PASSWORD }}
+          CONTENTEDITOR_USERNAME:    ${{ secrets.CONTENTEDITOR_USERNAME }}
+          CONTENTEDITOR_PASSWORD:    ${{ secrets.CONTENTEDITOR_PASSWORD }}
+          DEFAULT_2FA_USERNAME:      ${{ secrets.DEFAULT_2FA_USERNAME }}
+          DEFAULT_2FA_PASSWORD:      ${{ secrets.DEFAULT_2FA_PASSWORD }}
+          DEFAULT_2FA_TOTP_SECRET:   ${{ secrets.DEFAULT_2FA_TOTP_SECRET }}
+
+      # ── Save passing screenshots as the new baseline (rolling) ────────────────
+      - name: Save screenshots as new baseline
+        uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: visual-baseline
+          path: snapshots/
+          retention-days: 90
+          overwrite: true
+          compression-level: 6
+
+      # ── Always upload the HTML report ─────────────────────────────────────────
+      - name: Upload HTML report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: playwright-report-${{ env.TEST_ENV }}-${{ github.run_number }}
+          path: playwright-report/
+          retention-days: 30
+          compression-level: 6
+
+      # ── On failure: upload diffs & traces for debugging ───────────────────────
+      - name: Upload failure diffs & traces
+        uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: test-results-${{ env.TEST_ENV }}-${{ github.run_number }}
+          path: test-results/
+          retention-days: 7
+          compression-level: 6
+
+      # ── Job summary ───────────────────────────────────────────────────────────
+      - name: Post job summary
+        if: always()
+        run: |
+          declare -A URLS=(
+            [dev]="https://drupal.dev.energysafetycanada.com"
+            [test]="https://drupal.test.energysafetycanada.com"
+            [uat]="https://drupal.uat.energysafetycanada.com"
+            [beta]="https://beta.energysafetycanada.com"
+            [prod]="https://energysafetycanada.com"
+          )
+          STATUS="${{ job.status }}"
+          ENV="${{ env.TEST_ENV }}"
+          BASE_URL="${URLS[$ENV]}"
+          ICON=$([[ "$STATUS" == "success" ]] && echo "✅" || echo "❌")
+
+          echo "## $ICON Visual Tests — \`$ENV\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| | |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| Environment | \`$ENV\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Base URL    | $BASE_URL |" >> $GITHUB_STEP_SUMMARY
+          echo "| Status      | $STATUS |" >> $GITHUB_STEP_SUMMARY
+          echo "| Run         | #${{ github.run_number }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [ "$STATUS" = "success" ]; then
+            echo "📸 Baseline updated — next run will compare against this run's screenshots." >> $GITHUB_STEP_SUMMARY
+          else
+            echo "⚠️ Baseline NOT updated — previous baseline retained." >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### View the report" >> $GITHUB_STEP_SUMMARY
+          echo "1. Scroll to **Artifacts** at the bottom of this page" >> $GITHUB_STEP_SUMMARY
+          echo "2. Download \`playwright-report-$ENV-${{ github.run_number }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "3. Extract and open \`index.html\`" >> $GITHUB_STEP_SUMMARY

@@ -1,0 +1,62 @@
+{
+  "name": "playwright-visual-testing",
+  "version": "1.0.0",
+  "description": "Native Playwright visual regression testing for Energy Safety Canada",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "report":    "npx playwright show-report",
+
+    "clear:snapshots": "rm -rf snapshots",
+
+    "// ── Combined: public + portal ──────────────────────────────────────": "",
+    "baseline:dev":    "TEST_ENV=dev  npx playwright test --update-snapshots",
+    "baseline:test":   "TEST_ENV=test npx playwright test --update-snapshots",
+    "baseline:uat":    "TEST_ENV=uat  npx playwright test --update-snapshots",
+    "baseline:prod":   "TEST_ENV=prod npx playwright test --update-snapshots",
+    "baseline:beta":   "TEST_ENV=beta npx playwright test --update-snapshots",
+
+    "test:dev":        "TEST_ENV=dev  npx playwright test",
+    "test:test":       "TEST_ENV=test npx playwright test",
+    "test:uat":        "TEST_ENV=uat  npx playwright test",
+    "test:beta":       "TEST_ENV=beta npx playwright test",
+    "test:prod":       "TEST_ENV=prod npx playwright test",
+
+    "// ── Public pages only (no login) ──────────────────────────────────": "",
+    "baseline:public:dev":  "TEST_ENV=dev  npx playwright test esc.visual --update-snapshots",
+    "baseline:public:test": "TEST_ENV=test npx playwright test esc.visual --update-snapshots",
+    "baseline:public:uat":  "TEST_ENV=uat  npx playwright test esc.visual --update-snapshots",
+    "baseline:public:prod": "TEST_ENV=prod npx playwright test esc.visual --update-snapshots",
+    "baseline:public:beta": "TEST_ENV=beta npx playwright test esc.visual --update-snapshots",
+
+    "test:public:dev":      "TEST_ENV=dev  npx playwright test esc.visual",
+    "test:public:test":     "TEST_ENV=test npx playwright test esc.visual",
+    "test:public:uat":      "TEST_ENV=uat  npx playwright test esc.visual",
+    "test:public:beta":     "TEST_ENV=beta npx playwright test esc.visual",
+    "test:public:prod":     "TEST_ENV=prod npx playwright test esc.visual",
+
+    "// ── Portal pages only (login required) ─────────────────────────────": "",
+    "baseline:portal:dev":  "TEST_ENV=dev  npx playwright test esc.portal --update-snapshots",
+    "baseline:portal:test": "TEST_ENV=test npx playwright test esc.portal --update-snapshots",
+    "baseline:portal:uat":  "TEST_ENV=uat  npx playwright test esc.portal --update-snapshots",
+    "baseline:portal:prod": "TEST_ENV=prod npx playwright test esc.portal --update-snapshots",
+    "baseline:portal:beta": "TEST_ENV=beta npx playwright test esc.portal --update-snapshots",
+
+    "test:portal:dev":      "TEST_ENV=dev  npx playwright test esc.portal",
+    "test:portal:test":     "TEST_ENV=test npx playwright test esc.portal",
+    "test:portal:uat":      "TEST_ENV=uat  npx playwright test esc.portal",
+    "test:portal:beta":     "TEST_ENV=beta npx playwright test esc.portal",
+    "test:portal:prod":     "TEST_ENV=prod npx playwright test esc.portal"
+  },
+  "dependencies": {
+    "otpauth": "^9.3.6"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.41.0",
+    "@types/node": "^20.0.0",
+    "dotenv": "^17.3.1",
+    "typescript": "^5.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
