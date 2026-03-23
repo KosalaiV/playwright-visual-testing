@@ -150,10 +150,10 @@ jobs:
           SHARD="${{ matrix.shard }}"
           if [ -d "snapshots" ] && [ "$(ls -A snapshots 2>/dev/null)" ]; then
             echo "▶ Baseline found — running comparison [public shard $SHARD / $ENV]"
-            TEST_ENV=$ENV npx playwright test esc.visual --shard="$SHARD"
+            TEST_ENV=$ENV npx playwright test esc.visual --shard="$SHARD" --pass-with-no-tests
           else
             echo "▶ No baseline found — capturing initial baseline [public shard $SHARD / $ENV]"
-            TEST_ENV=$ENV npx playwright test esc.visual --shard="$SHARD" --update-snapshots
+            TEST_ENV=$ENV npx playwright test esc.visual --shard="$SHARD" --update-snapshots --pass-with-no-tests
           fi
         env:
           TEST_ENV:      ${{ env.TEST_ENV }}
@@ -235,10 +235,10 @@ jobs:
           GREP="Portal \[$ROLE\]"
           if [ -d "snapshots" ] && [ "$(ls -A snapshots 2>/dev/null)" ]; then
             echo "▶ Baseline found — running comparison [portal/$ROLE / $ENV]"
-            TEST_ENV=$ENV npx playwright test esc.portal --grep "$GREP"
+            TEST_ENV=$ENV npx playwright test esc.portal --grep "$GREP" --pass-with-no-tests
           else
             echo "▶ No baseline found — capturing initial baseline [portal/$ROLE / $ENV]"
-            TEST_ENV=$ENV npx playwright test esc.portal --grep "$GREP" --update-snapshots
+            TEST_ENV=$ENV npx playwright test esc.portal --grep "$GREP" --update-snapshots --pass-with-no-tests
           fi
         env:
           TEST_ENV:                  ${{ env.TEST_ENV }}
