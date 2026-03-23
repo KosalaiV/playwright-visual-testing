@@ -314,6 +314,14 @@ jobs:
           retention-days: 30
           compression-level: 6
 
+      - name: Delete blob report artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api repos/${{ github.repository }}/actions/artifacts \
+            --paginate --jq '.artifacts[] | select(.name | startswith("blob-report-")) | .id' | \
+            xargs -I {} gh api repos/${{ github.repository }}/actions/artifacts/{} -X DELETE
+
   # ── Merge all snapshots and save new baseline ─────────────────────────────────
   # Only runs when ALL test jobs pass.
   save-baseline:
