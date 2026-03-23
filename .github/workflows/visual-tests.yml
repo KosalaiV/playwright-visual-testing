@@ -35,6 +35,10 @@ on:
         type: choice
         options: [dev, test, uat, beta, prod]
 
+permissions:
+  actions: read
+  contents: read
+
 concurrency:
   group: visual-tests-${{ github.ref }}
   cancel-in-progress: true
@@ -134,7 +138,7 @@ jobs:
         uses: dawidd6/action-download-artifact@v6
         continue-on-error: true
         with:
-          name: visual-baseline
+          name: visual-baseline-${{ env.TEST_ENV }}
           path: snapshots/
           workflow: visual-tests.yml
           workflow_conclusion: success
@@ -218,7 +222,7 @@ jobs:
         uses: dawidd6/action-download-artifact@v6
         continue-on-error: true
         with:
-          name: visual-baseline
+          name: visual-baseline-${{ env.TEST_ENV }}
           path: snapshots/
           workflow: visual-tests.yml
           workflow_conclusion: success
@@ -348,7 +352,7 @@ jobs:
       - name: Save merged snapshots as new baseline
         uses: actions/upload-artifact@v4
         with:
-          name: visual-baseline
+          name: visual-baseline-${{ env.TEST_ENV }}
           path: snapshots/
           retention-days: 90
           overwrite: true
