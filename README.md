@@ -194,34 +194,45 @@ That's all. The pipeline handles everything else automatically.
 
 ### What the pipeline does
 
-The pipeline runs two jobs **in parallel** on separate runners, then merges results:
-
 ```
-public job  ──┐
-              ├── run simultaneously ──► merge ──► save new baseline
-portal job  ──┘
+setup ──► public/shard-1  ──┐
+           public/shard-2   ──┤
+           public/shard-3   ──┤
+           portal/student   ──┤
+           portal/instructor ──┤
+           portal/companyadmin──┼──► merge ──► save-baseline
+           portal/provider  ──┤
+           portal/multirole ──┤
+           portal/evaluator ──┤
+           portal/auditor   ──┤
+           portal/assessor  ──┤
+           portal/contenteditor─┘
 ```
 
-1. **Public** and **Portal** jobs start at the same time on separate runners
-2. Each job installs Node, Playwright, and logs the environment and base URL
+A single `setup` job runs first — installs npm dependencies and Playwright browsers, then saves everything to cache. All 12 parallel jobs restore from that cache instantly instead of reinstalling.
+
+Public pages are split evenly across 3 shards using Playwright's built-in `--shard` flag. Portal pages run one job per role using `--grep`.
+
+1. **Setup** installs deps and browsers, saves to cache
+2. All 12 jobs start simultaneously, restore deps from cache
 3. Each job downloads the `visual-baseline` artifact from the last passing run
 4. If a baseline exists → runs comparison
 5. If no baseline exists (first run) → captures initial baseline automatically
 6. Each job uploads its own partial snapshots on pass
-7. **Both pass** → merge job combines snapshots and saves new `visual-baseline`
-8. **Either fails** → baseline is not updated; previous baseline retained
+7. **All pass** → merge job combines all snapshots and saves new `visual-baseline`
+8. **Any fail** → baseline not updated; previous baseline retained; other roles continue running (`fail-fast: false`)
 9. Each job always uploads its own HTML report
 10. On failure, each job uploads diffs and traces for debugging
 
 ### Artifacts produced
 
-| Artifact                                     | When         | Retained  |
-|----------------------------------------------|--------------|-----------|
-| `visual-baseline`                            | Both pass    | 90 days   |
-| `playwright-report-public-{env}-{run}`       | Always       | 30 days   |
-| `playwright-report-portal-{env}-{run}`       | Always       | 30 days   |
-| `test-results-public-{env}-{run}`            | Public fails | 7 days    |
-| `test-results-portal-{env}-{run}`            | Portal fails | 7 days    |
+| Artifact                                              | When         | Retained  |
+|-------------------------------------------------------|--------------|-----------|
+| `visual-baseline`                                     | All pass     | 90 days   |
+| `playwright-report-public-{env}-{run}`                | Always       | 30 days   |
+| `playwright-report-portal-{role}-{env}-{run}`         | Always       | 30 days   |
+| `test-results-public-{env}-{run}`                     | Public fails | 7 days    |
+| `test-results-portal-{role}-{env}-{run}`              | Role fails   | 7 days    |
 
 ---
 

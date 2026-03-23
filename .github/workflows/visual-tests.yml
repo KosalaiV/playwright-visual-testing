@@ -1,16 +1,27 @@
 name: Visual Regression Tests
 
-# ── How baselines work (Rolling — Option A) ───────────────────────────────────
+# ── Execution flow ────────────────────────────────────────────────────────────
 #
-#  Public pages and portal pages run in parallel on separate runners.
-#  Each job downloads the last passing baseline, runs its suite, and uploads
-#  its snapshots. A final merge job combines both and saves the new baseline.
+#  1. setup        → installs npm deps + Playwright browsers, saves to cache
+#  2. parallel     → all jobs below start simultaneously, restore from cache
+#       public/shard-1
+#       public/shard-2
+#       public/shard-3
+#       portal/student
+#       portal/instructor
+#       portal/companyadmin
+#       portal/provider
+#       portal/multirole
+#       portal/evaluator
+#       portal/auditor
+#       portal/assessor
+#       portal/contenteditor
+#  3. save-baseline → merges all snapshots, saves new visual-baseline artifact
 #
-#  • Both pass  → merged snapshots saved as the new visual-baseline
-#  • Either fails → baseline NOT updated; previous baseline retained
-#  • First run  → no baseline found → auto-captures initial baseline
-#
-#  Environment is selected at run time. The base URL is printed in the logs.
+#  Rolling baseline:
+#  • All jobs pass  → merged snapshots saved as the new visual-baseline
+#  • Any job fails  → baseline NOT updated; previous baseline retained
+#  • First run      → no baseline found → auto-captures initial baseline
 # ─────────────────────────────────────────────────────────────────────────────
 
 on:
@@ -32,29 +43,45 @@ env:
 
 jobs:
 
-  # ── Public pages (no login) ───────────────────────────────────────────────────
-  public:
-    name: "Public Pages — ${{ github.event.inputs.environment || 'uat' }}"
+  # ── Setup: install deps + browsers, populate cache ────────────────────────────
+  setup:
+    name: Setup
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 15
+    outputs:
+      playwright-version: ${{ steps.playwright-version.outputs.version }}
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: '20'
           cache: 'npm'
 
-      - name: Install dependencies
+      - name: Install npm dependencies
         run: npm ci
 
+      - name: Get Playwright version (for cache key)
+        id: playwright-version
+        run: echo "version=$(npx playwright --version | cut -d' ' -f2)" >> $GITHUB_OUTPUT
+
+      - name: Cache Playwright browsers
+        id: playwright-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ steps.playwright-version.outputs.version }}
+
       - name: Install Playwright browsers
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
         run: npx playwright install chromium --with-deps
 
-      - name: Log execution details
+      - name: Install Playwright OS dependencies only (cache hit)
+        if: steps.playwright-cache.outputs.cache-hit == 'true'
+        run: npx playwright install-deps chromium
+
+      - name: Log setup details
         run: |
           declare -A URLS=(
             [dev]="https://drupal.dev.energysafetycanada.com"
@@ -63,13 +90,44 @@ jobs:
             [beta]="https://beta.energysafetycanada.com"
             [prod]="https://energysafetycanada.com"
           )
-          BASE_URL="${URLS[${{ env.TEST_ENV }}]}"
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo "  Suite       : Public Pages"
-          echo "  Environment : ${{ env.TEST_ENV }}"
-          echo "  Base URL    : $BASE_URL"
-          echo "  Run #       : ${{ github.run_number }}"
+          echo "  Environment      : ${{ env.TEST_ENV }}"
+          echo "  Base URL         : ${URLS[${{ env.TEST_ENV }}]}"
+          echo "  Playwright       : ${{ steps.playwright-version.outputs.version }}"
+          echo "  Browser cache    : ${{ steps.playwright-cache.outputs.cache-hit == 'true' && 'HIT (restored)' || 'MISS (installed fresh)' }}"
+          echo "  Run #            : ${{ github.run_number }}"
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+  # ── Public pages — sharded across 3 parallel runners ─────────────────────────
+  public:
+    name: "Public [shard ${{ matrix.shard }}]"
+    runs-on: ubuntu-latest
+    needs: setup
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ['1/3', '2/3', '3/3']
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Restore Playwright browsers from cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ needs.setup.outputs.playwright-version }}
+
+      - name: Install Playwright OS dependencies
+        run: npx playwright install-deps chromium
 
       - name: Restore baseline artifact
         uses: dawidd6/action-download-artifact@v6
@@ -81,26 +139,27 @@ jobs:
           workflow_conclusion: success
           search_artifacts: true
 
-      - name: Run public page tests
+      - name: Run public page tests (shard ${{ matrix.shard }})
         run: |
           ENV="${{ env.TEST_ENV }}"
+          SHARD="${{ matrix.shard }}"
           if [ -d "snapshots" ] && [ "$(ls -A snapshots 2>/dev/null)" ]; then
-            echo "▶ Baseline found — running comparison [public / $ENV]"
-            npm run test:public:$ENV
+            echo "▶ Baseline found — running comparison [public shard $SHARD / $ENV]"
+            TEST_ENV=$ENV npx playwright test esc.visual --shard="$SHARD"
           else
-            echo "▶ No baseline found — capturing initial baseline [public / $ENV]"
-            npm run baseline:public:$ENV
+            echo "▶ No baseline found — capturing initial baseline [public shard $SHARD / $ENV]"
+            TEST_ENV=$ENV npx playwright test esc.visual --shard="$SHARD" --update-snapshots
           fi
         env:
           TEST_ENV:      ${{ env.TEST_ENV }}
           HTACCESS_USER: ${{ secrets.HTACCESS_USER }}
           HTACCESS_PASS: ${{ secrets.HTACCESS_PASS }}
 
-      - name: Upload public snapshots
+      - name: Upload public snapshots (shard ${{ matrix.shard }})
         uses: actions/upload-artifact@v4
         if: success()
         with:
-          name: snapshots-public
+          name: snapshots-public-${{ strategy.job-index }}
           path: snapshots/
           retention-days: 1
           compression-level: 6
@@ -109,7 +168,7 @@ jobs:
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: playwright-report-public-${{ env.TEST_ENV }}-${{ github.run_number }}
+          name: playwright-report-public-shard-${{ strategy.job-index }}-${{ env.TEST_ENV }}-${{ github.run_number }}
           path: playwright-report/
           retention-days: 30
           compression-level: 6
@@ -118,49 +177,50 @@ jobs:
         uses: actions/upload-artifact@v4
         if: failure()
         with:
-          name: test-results-public-${{ env.TEST_ENV }}-${{ github.run_number }}
+          name: test-results-public-shard-${{ strategy.job-index }}-${{ env.TEST_ENV }}-${{ github.run_number }}
           path: test-results/
           retention-days: 7
           compression-level: 6
 
-  # ── Portal pages (login required) ────────────────────────────────────────────
+  # ── Portal pages — one job per role, all running in parallel ─────────────────
   portal:
-    name: "Portal Pages — ${{ github.event.inputs.environment || 'uat' }}"
+    name: "Portal [${{ matrix.role }}]"
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    needs: setup
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        role:
+          - student
+          - instructor
+          - companyadmin
+          - provider
+          - multirole
+          - evaluator
+          - auditor
+          - assessor
+          - contenteditor
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: '20'
           cache: 'npm'
 
-      - name: Install dependencies
+      - name: Install npm dependencies
         run: npm ci
 
-      - name: Install Playwright browsers
-        run: npx playwright install chromium --with-deps
+      - name: Restore Playwright browsers from cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ needs.setup.outputs.playwright-version }}
 
-      - name: Log execution details
-        run: |
-          declare -A URLS=(
-            [dev]="https://drupal.dev.energysafetycanada.com"
-            [test]="https://drupal.test.energysafetycanada.com"
-            [uat]="https://drupal.uat.energysafetycanada.com"
-            [beta]="https://beta.energysafetycanada.com"
-            [prod]="https://energysafetycanada.com"
-          )
-          BASE_URL="${URLS[${{ env.TEST_ENV }}]}"
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo "  Suite       : Portal Pages"
-          echo "  Environment : ${{ env.TEST_ENV }}"
-          echo "  Base URL    : $BASE_URL"
-          echo "  Run #       : ${{ github.run_number }}"
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+      - name: Install Playwright OS dependencies
+        run: npx playwright install-deps chromium
 
       - name: Restore baseline artifact
         uses: dawidd6/action-download-artifact@v6
@@ -172,15 +232,17 @@ jobs:
           workflow_conclusion: success
           search_artifacts: true
 
-      - name: Run portal page tests
+      - name: Run portal tests for ${{ matrix.role }}
         run: |
           ENV="${{ env.TEST_ENV }}"
+          ROLE="${{ matrix.role }}"
+          GREP="Portal \[$ROLE\]"
           if [ -d "snapshots" ] && [ "$(ls -A snapshots 2>/dev/null)" ]; then
-            echo "▶ Baseline found — running comparison [portal / $ENV]"
-            npm run test:portal:$ENV
+            echo "▶ Baseline found — running comparison [portal/$ROLE / $ENV]"
+            TEST_ENV=$ENV npx playwright test esc.portal --grep "$GREP"
           else
-            echo "▶ No baseline found — capturing initial baseline [portal / $ENV]"
-            npm run baseline:portal:$ENV
+            echo "▶ No baseline found — capturing initial baseline [portal/$ROLE / $ENV]"
+            TEST_ENV=$ENV npx playwright test esc.portal --grep "$GREP" --update-snapshots
           fi
         env:
           TEST_ENV:                  ${{ env.TEST_ENV }}
@@ -205,11 +267,11 @@ jobs:
           CONTENTEDITOR_USERNAME:    ${{ secrets.CONTENTEDITOR_USERNAME }}
           CONTENTEDITOR_PASSWORD:    ${{ secrets.CONTENTEDITOR_PASSWORD }}
 
-      - name: Upload portal snapshots
+      - name: Upload portal snapshots (${{ matrix.role }})
         uses: actions/upload-artifact@v4
         if: success()
         with:
-          name: snapshots-portal
+          name: snapshots-portal-${{ matrix.role }}
           path: snapshots/
           retention-days: 1
           compression-level: 6
@@ -218,7 +280,7 @@ jobs:
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: playwright-report-portal-${{ env.TEST_ENV }}-${{ github.run_number }}
+          name: playwright-report-portal-${{ matrix.role }}-${{ env.TEST_ENV }}-${{ github.run_number }}
           path: playwright-report/
           retention-days: 30
           compression-level: 6
@@ -227,14 +289,13 @@ jobs:
         uses: actions/upload-artifact@v4
         if: failure()
         with:
-          name: test-results-portal-${{ env.TEST_ENV }}-${{ github.run_number }}
+          name: test-results-portal-${{ matrix.role }}-${{ env.TEST_ENV }}-${{ github.run_number }}
           path: test-results/
           retention-days: 7
           compression-level: 6
 
-  # ── Merge snapshots and save new baseline ────────────────────────────────────
-  # Only runs when BOTH public and portal pass.
-  # Downloads partial snapshots from each job, merges them, saves as visual-baseline.
+  # ── Merge all snapshots and save new baseline ─────────────────────────────────
+  # Only runs when ALL jobs pass.
   save-baseline:
     name: Save Baseline
     runs-on: ubuntu-latest
@@ -242,17 +303,19 @@ jobs:
     if: needs.public.result == 'success' && needs.portal.result == 'success'
 
     steps:
-      - name: Download public snapshots
+      - name: Download all public snapshots
         uses: actions/download-artifact@v4
         with:
-          name: snapshots-public
+          pattern: snapshots-public-*
           path: snapshots/
+          merge-multiple: true
 
-      - name: Download portal snapshots
+      - name: Download all portal snapshots
         uses: actions/download-artifact@v4
         with:
-          name: snapshots-portal
+          pattern: snapshots-portal-*
           path: snapshots/
+          merge-multiple: true
 
       - name: Save merged snapshots as new baseline
         uses: actions/upload-artifact@v4
@@ -287,11 +350,9 @@ jobs:
           BASELINE="${{ needs.save-baseline.result }}"
 
           if [ "$PUBLIC" = "success" ] && [ "$PORTAL" = "success" ]; then
-            ICON="✅"
-            STATUS="success"
+            ICON="✅"; STATUS="success"
           else
-            ICON="❌"
-            STATUS="failure"
+            ICON="❌"; STATUS="failure"
           fi
 
           echo "## $ICON Visual Tests — \`$ENV\`" >> $GITHUB_STEP_SUMMARY
@@ -313,5 +374,5 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Reports" >> $GITHUB_STEP_SUMMARY
           echo "Download from **Artifacts** at the bottom of this page:" >> $GITHUB_STEP_SUMMARY
-          echo "- \`playwright-report-public-$ENV-${{ github.run_number }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- \`playwright-report-portal-$ENV-${{ github.run_number }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- \`playwright-report-public-shard-{0,1,2}-$ENV-${{ github.run_number }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- \`playwright-report-portal-{role}-$ENV-${{ github.run_number }}\`" >> $GITHUB_STEP_SUMMARY

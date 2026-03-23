@@ -2,7 +2,7 @@ import { defineConfig, devices } from '@playwright/test';
 import * as dotenv from 'dotenv';
 import * as path from 'path';
 
-dotenv.config();
+dotenv.config({ quiet: true });
 
 // ── Environment selection ────────────────────────────────────────────────────
 // Set TEST_ENV to choose which environment to run against.
