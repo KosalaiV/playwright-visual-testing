@@ -47,9 +47,6 @@
     "test:portal:beta":     "TEST_ENV=beta npx playwright test esc.portal",
     "test:portal:prod":     "TEST_ENV=prod npx playwright test esc.portal"
   },
-  "dependencies": {
-    "otpauth": "^9.3.6"
-  },
   "devDependencies": {
     "@playwright/test": "^1.41.0",
     "@types/node": "^20.0.0",

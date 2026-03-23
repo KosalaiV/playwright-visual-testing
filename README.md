@@ -150,10 +150,6 @@ ASSESSOR_PASSWORD=
 CONTENTEDITOR_USERNAME=
 CONTENTEDITOR_PASSWORD=
 
-# 2FA (if applicable)
-DEFAULT_2FA_USERNAME=
-DEFAULT_2FA_PASSWORD=
-DEFAULT_2FA_TOTP_SECRET=
 ```
 
 ### Commands
@@ -196,34 +192,36 @@ Environment:  [ uat ▼ ]   (dev / test / uat / prod)
 
 That's all. The pipeline handles everything else automatically.
 
-### Automatic triggers
-
-The pipeline also runs automatically on:
-- Push to `main` or `develop`
-- Pull request targeting `main` or `develop`
-
-Both auto-runs default to the `uat` environment.
-
 ### What the pipeline does
 
-1. Checks out the repository
-2. Installs Node and Playwright
-3. Logs the environment and base URL being tested
-4. Downloads the `visual-baseline` artifact from the last passing run
-5. If a baseline exists → runs comparison
-6. If no baseline exists (first run) → captures initial baseline automatically
-7. On pass → saves current screenshots as the new `visual-baseline` artifact
-8. On fail → baseline is **not** updated; previous baseline is retained
-9. Always uploads the HTML report as an artifact
-10. On failure, also uploads diffs and traces for debugging
+The pipeline runs two jobs **in parallel** on separate runners, then merges results:
+
+```
+public job  ──┐
+              ├── run simultaneously ──► merge ──► save new baseline
+portal job  ──┘
+```
+
+1. **Public** and **Portal** jobs start at the same time on separate runners
+2. Each job installs Node, Playwright, and logs the environment and base URL
+3. Each job downloads the `visual-baseline` artifact from the last passing run
+4. If a baseline exists → runs comparison
+5. If no baseline exists (first run) → captures initial baseline automatically
+6. Each job uploads its own partial snapshots on pass
+7. **Both pass** → merge job combines snapshots and saves new `visual-baseline`
+8. **Either fails** → baseline is not updated; previous baseline retained
+9. Each job always uploads its own HTML report
+10. On failure, each job uploads diffs and traces for debugging
 
 ### Artifacts produced
 
-| Artifact                              | When         | Retained  |
-|---------------------------------------|--------------|-----------|
-| `visual-baseline`                     | On pass      | 90 days   |
-| `playwright-report-{env}-{run}`       | Always       | 30 days   |
-| `test-results-{env}-{run}`            | On failure   | 7 days    |
+| Artifact                                     | When         | Retained  |
+|----------------------------------------------|--------------|-----------|
+| `visual-baseline`                            | Both pass    | 90 days   |
+| `playwright-report-public-{env}-{run}`       | Always       | 30 days   |
+| `playwright-report-portal-{env}-{run}`       | Always       | 30 days   |
+| `test-results-public-{env}-{run}`            | Public fails | 7 days    |
+| `test-results-portal-{env}-{run}`            | Portal fails | 7 days    |
 
 ---
 
@@ -332,8 +330,5 @@ After adding a page, run the baseline command once to capture its initial snapsh
 | `ASSESSOR_PASSWORD`       | Portal tests    | Login credential for assessor role               |
 | `CONTENTEDITOR_USERNAME`  | Portal tests    | Login credential for contenteditor role          |
 | `CONTENTEDITOR_PASSWORD`  | Portal tests    | Login credential for contenteditor role          |
-| `DEFAULT_2FA_USERNAME`    | If 2FA enabled  | Username for TOTP 2FA login                      |
-| `DEFAULT_2FA_PASSWORD`    | If 2FA enabled  | Password for TOTP 2FA login                      |
-| `DEFAULT_2FA_TOTP_SECRET` | If 2FA enabled  | TOTP secret key for generating OTP codes         |
 | `HEADED`                  | No              | Set to `1` to run browser in headed mode locally |
 | `CI`                      | Auto (GitHub)   | Enables JSON + GitHub reporters when set         |

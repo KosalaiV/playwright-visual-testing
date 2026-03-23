@@ -2,20 +2,18 @@ name: Visual Regression Tests
 
 # ── How baselines work (Rolling — Option A) ───────────────────────────────────
 #
-#  Every run downloads the last passing build's screenshots as the baseline.
-#  • If tests pass  → current screenshots become the new baseline.
-#  • If tests fail  → baseline is NOT updated; previous baseline is retained.
-#  • First run (no baseline yet) → auto-captures initial baseline, no failure.
+#  Public pages and portal pages run in parallel on separate runners.
+#  Each job downloads the last passing baseline, runs its suite, and uploads
+#  its snapshots. A final merge job combines both and saves the new baseline.
 #
-#  Environment is selected at run time. Cross-environment runs are supported —
-#  comparison is image vs image by filename, environment is logged for reference.
+#  • Both pass  → merged snapshots saved as the new visual-baseline
+#  • Either fails → baseline NOT updated; previous baseline retained
+#  • First run  → no baseline found → auto-captures initial baseline
+#
+#  Environment is selected at run time. The base URL is printed in the logs.
 # ─────────────────────────────────────────────────────────────────────────────
 
 on:
-  push:
-    branches: [main, develop]
-  pull_request:
-    branches: [main, develop]
   workflow_dispatch:
     inputs:
       environment:
@@ -33,8 +31,101 @@ env:
   TEST_ENV: ${{ github.event.inputs.environment || 'uat' }}
 
 jobs:
-  visual-tests:
-    name: "Visual Tests — ${{ github.event.inputs.environment || 'uat' }}"
+
+  # ── Public pages (no login) ───────────────────────────────────────────────────
+  public:
+    name: "Public Pages — ${{ github.event.inputs.environment || 'uat' }}"
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright browsers
+        run: npx playwright install chromium --with-deps
+
+      - name: Log execution details
+        run: |
+          declare -A URLS=(
+            [dev]="https://drupal.dev.energysafetycanada.com"
+            [test]="https://drupal.test.energysafetycanada.com"
+            [uat]="https://drupal.uat.energysafetycanada.com"
+            [beta]="https://beta.energysafetycanada.com"
+            [prod]="https://energysafetycanada.com"
+          )
+          BASE_URL="${URLS[${{ env.TEST_ENV }}]}"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "  Suite       : Public Pages"
+          echo "  Environment : ${{ env.TEST_ENV }}"
+          echo "  Base URL    : $BASE_URL"
+          echo "  Run #       : ${{ github.run_number }}"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+      - name: Restore baseline artifact
+        uses: dawidd6/action-download-artifact@v6
+        continue-on-error: true
+        with:
+          name: visual-baseline
+          path: snapshots/
+          workflow: visual-tests.yml
+          workflow_conclusion: success
+          search_artifacts: true
+
+      - name: Run public page tests
+        run: |
+          ENV="${{ env.TEST_ENV }}"
+          if [ -d "snapshots" ] && [ "$(ls -A snapshots 2>/dev/null)" ]; then
+            echo "▶ Baseline found — running comparison [public / $ENV]"
+            npm run test:public:$ENV
+          else
+            echo "▶ No baseline found — capturing initial baseline [public / $ENV]"
+            npm run baseline:public:$ENV
+          fi
+        env:
+          TEST_ENV:      ${{ env.TEST_ENV }}
+          HTACCESS_USER: ${{ secrets.HTACCESS_USER }}
+          HTACCESS_PASS: ${{ secrets.HTACCESS_PASS }}
+
+      - name: Upload public snapshots
+        uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: snapshots-public
+          path: snapshots/
+          retention-days: 1
+          compression-level: 6
+
+      - name: Upload HTML report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: playwright-report-public-${{ env.TEST_ENV }}-${{ github.run_number }}
+          path: playwright-report/
+          retention-days: 30
+          compression-level: 6
+
+      - name: Upload failure diffs & traces
+        uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: test-results-public-${{ env.TEST_ENV }}-${{ github.run_number }}
+          path: test-results/
+          retention-days: 7
+          compression-level: 6
+
+  # ── Portal pages (login required) ────────────────────────────────────────────
+  portal:
+    name: "Portal Pages — ${{ github.event.inputs.environment || 'uat' }}"
     runs-on: ubuntu-latest
     timeout-minutes: 90
 
@@ -54,7 +145,6 @@ jobs:
       - name: Install Playwright browsers
         run: npx playwright install chromium --with-deps
 
-      # ── Log execution details ─────────────────────────────────────────────────
       - name: Log execution details
         run: |
           declare -A URLS=(
@@ -66,13 +156,12 @@ jobs:
           )
           BASE_URL="${URLS[${{ env.TEST_ENV }}]}"
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "  Suite       : Portal Pages"
           echo "  Environment : ${{ env.TEST_ENV }}"
           echo "  Base URL    : $BASE_URL"
           echo "  Run #       : ${{ github.run_number }}"
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-      # ── Restore last passing baseline ─────────────────────────────────────────
-      # continue-on-error so a missing artifact (first run) doesn't block the job.
       - name: Restore baseline artifact
         uses: dawidd6/action-download-artifact@v6
         continue-on-error: true
@@ -83,17 +172,15 @@ jobs:
           workflow_conclusion: success
           search_artifacts: true
 
-      # ── Run all tests ─────────────────────────────────────────────────────────
-      - name: Run visual tests
+      - name: Run portal page tests
         run: |
           ENV="${{ env.TEST_ENV }}"
-
           if [ -d "snapshots" ] && [ "$(ls -A snapshots 2>/dev/null)" ]; then
-            echo "▶ Baseline found — running comparison against [$ENV]"
-            npm run test:$ENV
+            echo "▶ Baseline found — running comparison [portal / $ENV]"
+            npm run test:portal:$ENV
           else
-            echo "▶ No baseline found — capturing initial baseline against [$ENV] (first-run bootstrap)"
-            npm run baseline:$ENV
+            echo "▶ No baseline found — capturing initial baseline [portal / $ENV]"
+            npm run baseline:portal:$ENV
           fi
         env:
           TEST_ENV:                  ${{ env.TEST_ENV }}
@@ -117,14 +204,58 @@ jobs:
           ASSESSOR_PASSWORD:         ${{ secrets.ASSESSOR_PASSWORD }}
           CONTENTEDITOR_USERNAME:    ${{ secrets.CONTENTEDITOR_USERNAME }}
           CONTENTEDITOR_PASSWORD:    ${{ secrets.CONTENTEDITOR_PASSWORD }}
-          DEFAULT_2FA_USERNAME:      ${{ secrets.DEFAULT_2FA_USERNAME }}
-          DEFAULT_2FA_PASSWORD:      ${{ secrets.DEFAULT_2FA_PASSWORD }}
-          DEFAULT_2FA_TOTP_SECRET:   ${{ secrets.DEFAULT_2FA_TOTP_SECRET }}
 
-      # ── Save passing screenshots as the new baseline (rolling) ────────────────
-      - name: Save screenshots as new baseline
+      - name: Upload portal snapshots
         uses: actions/upload-artifact@v4
         if: success()
+        with:
+          name: snapshots-portal
+          path: snapshots/
+          retention-days: 1
+          compression-level: 6
+
+      - name: Upload HTML report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: playwright-report-portal-${{ env.TEST_ENV }}-${{ github.run_number }}
+          path: playwright-report/
+          retention-days: 30
+          compression-level: 6
+
+      - name: Upload failure diffs & traces
+        uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: test-results-portal-${{ env.TEST_ENV }}-${{ github.run_number }}
+          path: test-results/
+          retention-days: 7
+          compression-level: 6
+
+  # ── Merge snapshots and save new baseline ────────────────────────────────────
+  # Only runs when BOTH public and portal pass.
+  # Downloads partial snapshots from each job, merges them, saves as visual-baseline.
+  save-baseline:
+    name: Save Baseline
+    runs-on: ubuntu-latest
+    needs: [public, portal]
+    if: needs.public.result == 'success' && needs.portal.result == 'success'
+
+    steps:
+      - name: Download public snapshots
+        uses: actions/download-artifact@v4
+        with:
+          name: snapshots-public
+          path: snapshots/
+
+      - name: Download portal snapshots
+        uses: actions/download-artifact@v4
+        with:
+          name: snapshots-portal
+          path: snapshots/
+
+      - name: Save merged snapshots as new baseline
+        uses: actions/upload-artifact@v4
         with:
           name: visual-baseline
           path: snapshots/
@@ -132,29 +263,15 @@ jobs:
           overwrite: true
           compression-level: 6
 
-      # ── Always upload the HTML report ─────────────────────────────────────────
-      - name: Upload HTML report
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: playwright-report-${{ env.TEST_ENV }}-${{ github.run_number }}
-          path: playwright-report/
-          retention-days: 30
-          compression-level: 6
+  # ── Job summary ───────────────────────────────────────────────────────────────
+  summary:
+    name: Summary
+    runs-on: ubuntu-latest
+    needs: [public, portal, save-baseline]
+    if: always()
 
-      # ── On failure: upload diffs & traces for debugging ───────────────────────
-      - name: Upload failure diffs & traces
-        uses: actions/upload-artifact@v4
-        if: failure()
-        with:
-          name: test-results-${{ env.TEST_ENV }}-${{ github.run_number }}
-          path: test-results/
-          retention-days: 7
-          compression-level: 6
-
-      # ── Job summary ───────────────────────────────────────────────────────────
+    steps:
       - name: Post job summary
-        if: always()
         run: |
           declare -A URLS=(
             [dev]="https://drupal.dev.energysafetycanada.com"
@@ -163,19 +280,30 @@ jobs:
             [beta]="https://beta.energysafetycanada.com"
             [prod]="https://energysafetycanada.com"
           )
-          STATUS="${{ job.status }}"
           ENV="${{ env.TEST_ENV }}"
           BASE_URL="${URLS[$ENV]}"
-          ICON=$([[ "$STATUS" == "success" ]] && echo "✅" || echo "❌")
+          PUBLIC="${{ needs.public.result }}"
+          PORTAL="${{ needs.portal.result }}"
+          BASELINE="${{ needs.save-baseline.result }}"
+
+          if [ "$PUBLIC" = "success" ] && [ "$PORTAL" = "success" ]; then
+            ICON="✅"
+            STATUS="success"
+          else
+            ICON="❌"
+            STATUS="failure"
+          fi
 
           echo "## $ICON Visual Tests — \`$ENV\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| | |" >> $GITHUB_STEP_SUMMARY
           echo "|---|---|" >> $GITHUB_STEP_SUMMARY
-          echo "| Environment | \`$ENV\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| Base URL    | $BASE_URL |" >> $GITHUB_STEP_SUMMARY
-          echo "| Status      | $STATUS |" >> $GITHUB_STEP_SUMMARY
-          echo "| Run         | #${{ github.run_number }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Environment  | \`$ENV\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Base URL     | $BASE_URL |" >> $GITHUB_STEP_SUMMARY
+          echo "| Run          | #${{ github.run_number }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Public Pages | $PUBLIC |" >> $GITHUB_STEP_SUMMARY
+          echo "| Portal Pages | $PORTAL |" >> $GITHUB_STEP_SUMMARY
+          echo "| Baseline     | $BASELINE |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           if [ "$STATUS" = "success" ]; then
             echo "📸 Baseline updated — next run will compare against this run's screenshots." >> $GITHUB_STEP_SUMMARY
@@ -183,7 +311,7 @@ jobs:
             echo "⚠️ Baseline NOT updated — previous baseline retained." >> $GITHUB_STEP_SUMMARY
           fi
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### View the report" >> $GITHUB_STEP_SUMMARY
-          echo "1. Scroll to **Artifacts** at the bottom of this page" >> $GITHUB_STEP_SUMMARY
-          echo "2. Download \`playwright-report-$ENV-${{ github.run_number }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "3. Extract and open \`index.html\`" >> $GITHUB_STEP_SUMMARY
+          echo "### Reports" >> $GITHUB_STEP_SUMMARY
+          echo "Download from **Artifacts** at the bottom of this page:" >> $GITHUB_STEP_SUMMARY
+          echo "- \`playwright-report-public-$ENV-${{ github.run_number }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- \`playwright-report-portal-$ENV-${{ github.run_number }}\`" >> $GITHUB_STEP_SUMMARY

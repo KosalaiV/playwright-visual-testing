@@ -1,57 +1,16 @@
 import { Page, expect } from '@playwright/test';
-import * as OTPAuth from 'otpauth';
 
 export interface LoginOptions {
   username?: string;
   password?: string;
-  totpSecret?: string;
   loginUrl?: string;
   expectedUrlPattern?: RegExp;
   /** Role for role-specific credentials (e.g. 'student' -> STUDENT_USERNAME) */
   role?: string;
 }
 
-export async function loginWithTOTP(
-  page: Page,
-  options: LoginOptions = {},
-): Promise<void> {
-  const {
-    username = process.env.DEFAULT_2FA_USERNAME!,
-    password = process.env.DEFAULT_2FA_PASSWORD!,
-    totpSecret = process.env.DEFAULT_2FA_TOTP_SECRET!,
-    loginUrl = '/user/login?type=default',
-    expectedUrlPattern = /check_logged_in=1/,
-  } = options;
-
-  if (!username || !password || !totpSecret) {
-    throw new Error(
-      'Missing required credentials. Provide username, password, and totpSecret, or set DEFAULT_2FA_USERNAME, DEFAULT_2FA_PASSWORD, and DEFAULT_2FA_TOTP_SECRET environment variables.',
-    );
-  }
-
-  await page.goto(loginUrl);
-
-  await page.fill('#edit-name', username);
-  await page.fill('#edit-pass', password);
-  await page.locator('#edit-submit').click();
-
-  await expect(page.locator('#edit-code')).toBeVisible({ timeout: 5000 });
-  const code = new OTPAuth.TOTP({
-    secret: totpSecret,
-    digits: 6,
-    period: 30,
-    algorithm: 'SHA1',
-  }).generate();
-  console.log('Generated OTP:', code);
-  await page.fill('#edit-code', code);
-
-  await page.locator('#edit-login').click();
-
-  await expect(page).toHaveURL(expectedUrlPattern, { timeout: 30000 });
-}
-
 /**
- * Basic form login without TOTP.
+ * Basic form login.
  * Supply username/password via args or DEFAULT_USERNAME / DEFAULT_PASSWORD env vars.
  */
 export async function loginWithoutTOTP(
