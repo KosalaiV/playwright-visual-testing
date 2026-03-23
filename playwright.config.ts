@@ -38,6 +38,11 @@ export default defineConfig({
   // Single snapshot directory — environment is identified from the run logs.
   snapshotDir: `./snapshots`,
 
+  // Remove platform (darwin/linux/win32) from snapshot filenames so baselines
+  // captured in CI (linux) work on any OS and vice versa.
+  // Default: {snapshotDir}/{testFileDir}/{testFileName}-snapshots/{arg}-{projectName}-{platform}{ext}
+  snapshotPathTemplate: '{snapshotDir}/{testFileDir}/{testFileName}-snapshots/{arg}-{projectName}{ext}',
+
   // Re-run flaky tests once before marking as failed.
   retries: 1,
 
@@ -45,13 +50,13 @@ export default defineConfig({
   fullyParallel: true,
   workers: 5,
 
-  // HTML report saved to playwright-report/.
-  // In CI, also emit a JSON report (useful for parsing results programmatically).
+  // In CI: blob reporter produces mergeable output so all parallel job reports
+  // can be combined into a single HTML report at the end of the run.
+  // Locally: standard HTML report opened on demand via `npm run report`.
   reporter: process.env.CI
     ? [
-        ['html', { open: 'never' }],
-        ['json', { outputFile: 'playwright-report/results.json' }],
-        ['github'],   // Annotates failing tests directly on PRs in GitHub Actions
+        ['blob'],     // mergeable output — combined into one report by merge-reports job
+        ['github'],   // annotates failing tests directly on PRs
       ]
     : [['html', { open: 'never' }]],
 
