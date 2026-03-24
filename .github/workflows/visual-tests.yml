@@ -17,6 +17,12 @@ on:
         type: choice
         options: [dev, test, uat, beta, prod]
 
+      update_baseline:
+        description: 'Generate new baseline snapshots (use on first run or to reset baseline)'
+        required: false
+        default: false
+        type: boolean
+
 permissions:
   actions: read
   contents: read
@@ -111,11 +117,13 @@ jobs:
           ENV="${{ env.TEST_ENV }}"
           BASE="${{ env.BASELINE_ENV }}"
           SHARD="${{ matrix.shard }}"
+          UPDATE_FLAG=""
+          [ "${{ github.event.inputs.update_baseline }}" = "true" ] && UPDATE_FLAG="--update-snapshots"
           echo "▶ Comparing [$ENV] against baseline [$BASE]"
-          TEST_ENV=$ENV npx playwright test esc.visual --shard="$SHARD" --pass-with-no-tests
+          TEST_ENV=$ENV npx playwright test esc.visual --shard="$SHARD" --pass-with-no-tests $UPDATE_FLAG
 
       - name: Upload snapshots
-        if: success()
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: snapshots-public-${{ strategy.job-index }}
@@ -173,13 +181,34 @@ jobs:
         run: ls -R snapshots || echo "No baseline found"
 
       - name: Run portal tests
+        env:
+          STUDENT_USERNAME: ${{ secrets.STUDENT_USERNAME }}
+          STUDENT_PASSWORD: ${{ secrets.STUDENT_PASSWORD }}
+          INSTRUCTOR_USERNAME: ${{ secrets.INSTRUCTOR_USERNAME }}
+          INSTRUCTOR_PASSWORD: ${{ secrets.INSTRUCTOR_PASSWORD }}
+          COMPANYADMIN_USERNAME: ${{ secrets.COMPANYADMIN_USERNAME }}
+          COMPANYADMIN_PASSWORD: ${{ secrets.COMPANYADMIN_PASSWORD }}
+          PROVIDER_USERNAME: ${{ secrets.PROVIDER_USERNAME }}
+          PROVIDER_PASSWORD: ${{ secrets.PROVIDER_PASSWORD }}
+          MULTIROLE_USERNAME: ${{ secrets.MULTIROLE_USERNAME }}
+          MULTIROLE_PASSWORD: ${{ secrets.MULTIROLE_PASSWORD }}
+          EVALUATOR_USERNAME: ${{ secrets.EVALUATOR_USERNAME }}
+          EVALUATOR_PASSWORD: ${{ secrets.EVALUATOR_PASSWORD }}
+          AUDITOR_USERNAME: ${{ secrets.AUDITOR_USERNAME }}
+          AUDITOR_PASSWORD: ${{ secrets.AUDITOR_PASSWORD }}
+          ASSESSOR_USERNAME: ${{ secrets.ASSESSOR_USERNAME }}
+          ASSESSOR_PASSWORD: ${{ secrets.ASSESSOR_PASSWORD }}
+          CONTENTEDITOR_USERNAME: ${{ secrets.CONTENTEDITOR_USERNAME }}
+          CONTENTEDITOR_PASSWORD: ${{ secrets.CONTENTEDITOR_PASSWORD }}
         run: |
           ENV="${{ env.TEST_ENV }}"
           BASE="${{ env.BASELINE_ENV }}"
           ROLE="${{ matrix.role }}"
           GREP="Portal \[$ROLE\]"
+          UPDATE_FLAG=""
+          [ "${{ github.event.inputs.update_baseline }}" = "true" ] && UPDATE_FLAG="--update-snapshots"
           echo "▶ Comparing [$ENV] against baseline [$BASE]"
-          TEST_ENV=$ENV npx playwright test esc.portal --grep "$GREP" --pass-with-no-tests
+          TEST_ENV=$ENV npx playwright test esc.portal --grep "$GREP" --pass-with-no-tests $UPDATE_FLAG
 
   # ─────────────────────────────────────────────────────────────
   # SAVE BASELINE
@@ -187,7 +216,9 @@ jobs:
   save-baseline:
     runs-on: ubuntu-latest
     needs: [public, portal]
-    if: needs.public.result == 'success' && needs.portal.result == 'success'
+    if: |
+      (needs.public.result == 'success' && needs.portal.result == 'success') ||
+      (github.event.inputs.update_baseline == 'true' && needs.public.result == 'success')
 
     steps:
       - uses: actions/checkout@v4
