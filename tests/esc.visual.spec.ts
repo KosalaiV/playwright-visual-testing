@@ -30,12 +30,12 @@ for (const p of PUBLIC_PAGES) {
     await page.goto(p.path, { waitUntil: 'load', timeout: 90_000 });
 
     // Let the page fully settle (hero carousel, lazy images, JS widgets).
-    await page.waitForTimeout(3_000);
+    await page.waitForTimeout(5_000);
 
     await preparePageForSnapshot(page);
 
-    // Brief pause after dismissing popups before capturing.
-    await page.waitForTimeout(1_000);
+    // Pause after dismissing popups and stopping carousels before capturing.
+    await page.waitForTimeout(3_000);
 
     await expect(page).toHaveScreenshot(`${toSlug(p.name)}.png`, {
       fullPage: true,

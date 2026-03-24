@@ -175,10 +175,52 @@ export async function hideChatWidgets(page: Page): Promise<void> {
 }
 
 /**
+ * Stop JavaScript-driven carousels and sliders so they don't advance
+ * between Playwright's consecutive screenshots (which causes "unstable screenshot" failures).
+ * Covers Slick, Swiper, Glide, Flickity, Owl Carousel, and plain setInterval-driven sliders.
+ */
+export async function stopCarousels(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    // Slick carousel
+    document.querySelectorAll<HTMLElement>('.slick-slider').forEach((el) => {
+      try { ($(el) as any).slick('slickPause'); } catch (_) {}
+    });
+
+    // Swiper
+    (window as any).Swiper?.instances?.forEach?.((s: any) => { try { s.autoplay?.stop(); } catch (_) {} });
+    document.querySelectorAll<any>('.swiper')?.forEach?.((el) => {
+      try { el.swiper?.autoplay?.stop(); } catch (_) {}
+    });
+
+    // Owl Carousel
+    document.querySelectorAll<HTMLElement>('.owl-carousel').forEach((el) => {
+      try { ($(el) as any).trigger('stop.owl.autoplay'); } catch (_) {}
+    });
+
+    // Glide.js
+    try { (window as any).Glide?.pause?.(); } catch (_) {}
+
+    // Flickity
+    document.querySelectorAll<HTMLElement>('.flickity-enabled').forEach((el) => {
+      try { (el as any).flickity?.('stopPlayer'); } catch (_) {}
+    });
+
+    // Freeze all CSS animations and transitions as a safety net
+    const style = document.createElement('style');
+    style.textContent = `*, *::before, *::after {
+      animation-play-state: paused !important;
+      transition: none !important;
+    }`;
+    document.head.appendChild(style);
+  }).catch(() => {});
+}
+
+/**
  * Run all pre-screenshot setup steps in order:
  * 1. Accept cookie consent popup
  * 2. Dismiss announcement banner
  * 3. Hide third-party chat / feedback widgets
+ * 4. Stop carousels / sliders
  *
  * Call this in beforeEach or at the start of each test after navigation.
  */
@@ -186,4 +228,5 @@ export async function preparePageForSnapshot(page: Page): Promise<void> {
   await acceptCookies(page);
   await dismissAnnouncementBanner(page);
   await hideChatWidgets(page);
+  await stopCarousels(page);
 }

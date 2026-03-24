@@ -74,6 +74,7 @@ export default defineConfig({
 
   expect: {
     toHaveScreenshot: {
+      timeout: 30_000,
       maxDiffPixelRatio: 0.005,
 
       stylePath: path.join(__dirname, 'styles/snapshot.css'),
