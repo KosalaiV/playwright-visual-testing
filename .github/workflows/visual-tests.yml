@@ -105,6 +105,9 @@ jobs:
         run: ls -R snapshots || echo "No baseline found"
 
       - name: Run public tests
+        env:
+          HTACCESS_USER: ${{ secrets.HTACCESS_USER }}
+          HTACCESS_PASS: ${{ secrets.HTACCESS_PASS }}
         run: |
           ENV="${{ env.TEST_ENV }}"
 
@@ -174,6 +177,8 @@ jobs:
 
       - name: Run portal tests
         env:
+          HTACCESS_USER: ${{ secrets.HTACCESS_USER }}
+          HTACCESS_PASS: ${{ secrets.HTACCESS_PASS }}
           STUDENT_USERNAME: ${{ secrets.STUDENT_USERNAME }}
           STUDENT_PASSWORD: ${{ secrets.STUDENT_PASSWORD }}
           INSTRUCTOR_USERNAME: ${{ secrets.INSTRUCTOR_USERNAME }}
