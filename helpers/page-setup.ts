@@ -175,44 +175,44 @@ export async function hideChatWidgets(page: Page): Promise<void> {
 }
 
 /**
- * Stop JavaScript-driven carousels and sliders so they don't advance
- * between Playwright's consecutive screenshots (which causes "unstable screenshot" failures).
- * Covers Slick, Swiper, Glide, Flickity, Owl Carousel, and plain setInterval-driven sliders.
+ * Kill all JS timers and freeze all animations so carousels/sliders cannot
+ * advance between Playwright's consecutive screenshots.
+ *
+ * Strategy:
+ * 1. Brute-force clear every setInterval/setTimeout by ID (works for ANY carousel library)
+ * 2. Override setInterval/setTimeout so no new timers can start
+ * 3. Freeze CSS animations and transitions
  */
 export async function stopCarousels(page: Page): Promise<void> {
   await page.evaluate(() => {
-    // Slick carousel
-    document.querySelectorAll<HTMLElement>('.slick-slider').forEach((el) => {
-      try { ($(el) as any).slick('slickPause'); } catch (_) {}
-    });
+    // Brute-force: allocate a fresh timer to get the current highest ID,
+    // then clear everything from 1 up to that ID.
+    const maxId = window.setTimeout(() => {}, 0);
+    for (let i = 1; i <= maxId; i++) {
+      window.clearInterval(i);
+      window.clearTimeout(i);
+    }
 
-    // Swiper
-    (window as any).Swiper?.instances?.forEach?.((s: any) => { try { s.autoplay?.stop(); } catch (_) {} });
-    document.querySelectorAll<any>('.swiper')?.forEach?.((el) => {
-      try { el.swiper?.autoplay?.stop(); } catch (_) {}
-    });
+    // Prevent any new timers from starting
+    window.setInterval = () => 0 as any;
+    window.setTimeout = () => 0 as any;
 
-    // Owl Carousel
-    document.querySelectorAll<HTMLElement>('.owl-carousel').forEach((el) => {
-      try { ($(el) as any).trigger('stop.owl.autoplay'); } catch (_) {}
-    });
+    // Stop requestAnimationFrame-based animations (modern carousels use RAF)
+    window.requestAnimationFrame = () => 0;
+    window.cancelAnimationFrame = () => {};
 
-    // Glide.js
-    try { (window as any).Glide?.pause?.(); } catch (_) {}
-
-    // Flickity
-    document.querySelectorAll<HTMLElement>('.flickity-enabled').forEach((el) => {
-      try { (el as any).flickity?.('stopPlayer'); } catch (_) {}
-    });
-
-    // Freeze all CSS animations and transitions as a safety net
+    // Freeze all CSS animations and transitions
     const style = document.createElement('style');
     style.textContent = `*, *::before, *::after {
+      animation: none !important;
       animation-play-state: paused !important;
       transition: none !important;
     }`;
     document.head.appendChild(style);
   }).catch(() => {});
+
+  // Give the page one tick to settle after timers are killed
+  await page.waitForTimeout(500);
 }
 
 /**
