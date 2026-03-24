@@ -10,13 +10,6 @@ on:
         type: choice
         options: [dev, test, uat, beta, prod]
 
-      baseline_env:
-        description: 'Baseline Environment (for comparison)'
-        required: false
-        default: 'uat'
-        type: choice
-        options: [dev, test, uat, beta, prod]
-
       update_baseline:
         description: 'Generate new baseline snapshots (use on first run or to reset baseline)'
         required: false
@@ -33,7 +26,6 @@ concurrency:
 
 env:
   TEST_ENV: ${{ github.event.inputs.environment || 'uat' }}
-  BASELINE_ENV: ${{ github.event.inputs.baseline_env || 'uat' }}
 
 jobs:
 
@@ -103,7 +95,7 @@ jobs:
         uses: dawidd6/action-download-artifact@v6
         continue-on-error: true
         with:
-          name: visual-baseline-${{ env.BASELINE_ENV }}
+          name: visual-baseline-${{ env.TEST_ENV }}
           path: snapshots/
           workflow: visual-tests.yml
           workflow_conclusion: success
@@ -115,11 +107,11 @@ jobs:
       - name: Run public tests
         run: |
           ENV="${{ env.TEST_ENV }}"
-          BASE="${{ env.BASELINE_ENV }}"
+
           SHARD="${{ matrix.shard }}"
           UPDATE_FLAG=""
           [ "${{ github.event.inputs.update_baseline }}" = "true" ] && UPDATE_FLAG="--update-snapshots"
-          echo "▶ Comparing [$ENV] against baseline [$BASE]"
+          echo "▶ Running [$ENV] tests against last [$ENV] baseline"
           TEST_ENV=$ENV npx playwright test esc.visual --shard="$SHARD" --pass-with-no-tests $UPDATE_FLAG
 
       - name: Upload snapshots
@@ -171,7 +163,7 @@ jobs:
         uses: dawidd6/action-download-artifact@v6
         continue-on-error: true
         with:
-          name: visual-baseline-${{ env.BASELINE_ENV }}
+          name: visual-baseline-${{ env.TEST_ENV }}
           path: snapshots/
           workflow: visual-tests.yml
           workflow_conclusion: success
@@ -202,12 +194,12 @@ jobs:
           CONTENTEDITOR_PASSWORD: ${{ secrets.CONTENTEDITOR_PASSWORD }}
         run: |
           ENV="${{ env.TEST_ENV }}"
-          BASE="${{ env.BASELINE_ENV }}"
+
           ROLE="${{ matrix.role }}"
           GREP="Portal \[$ROLE\]"
           UPDATE_FLAG=""
           [ "${{ github.event.inputs.update_baseline }}" = "true" ] && UPDATE_FLAG="--update-snapshots"
-          echo "▶ Comparing [$ENV] against baseline [$BASE]"
+          echo "▶ Running [$ENV] tests against last [$ENV] baseline"
           TEST_ENV=$ENV npx playwright test esc.portal --grep "$GREP" --pass-with-no-tests $UPDATE_FLAG
 
   # ─────────────────────────────────────────────────────────────
