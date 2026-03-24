@@ -18,6 +18,14 @@ import { vrPages } from '../helpers/pages';
 // Public pages only — pages with a `role` are handled by esc.portal.spec.ts.
 const PUBLIC_PAGES = vrPages.filter((p) => !p.role);
 
+const ENV = (process.env.TEST_ENV || 'uat').toUpperCase();
+
+// Attach environment label to every test — visible in the HTML report.
+test.beforeEach(async ({}, testInfo) => {
+  const baseURL = (testInfo.project.use as { baseURL?: string }).baseURL ?? '';
+  testInfo.annotations.push({ type: 'Environment', description: `${ENV} — ${baseURL}` });
+});
+
 /** Convert a page name to a safe snapshot filename. */
 function toSlug(name: string): string {
   return name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');

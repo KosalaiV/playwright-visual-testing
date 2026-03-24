@@ -10,8 +10,8 @@ on:
         type: choice
         options: [dev, test, uat, beta, prod]
 
-      update_baseline:
-        description: 'Generate new baseline snapshots'
+      reset_baseline:
+        description: 'Force reset baseline (ignore previous run)'
         required: false
         default: false
         type: boolean
@@ -71,7 +71,17 @@ jobs:
           STUDENT_PASSWORD: ${{ secrets.STUDENT_PASSWORD }}
         run: |
           UPDATE_FLAG=""
-          [ "${{ github.event.inputs.update_baseline }}" = "true" ] && UPDATE_FLAG="--update-snapshots"
+          if [ ! -d "snapshots" ] || [ -z "$(ls -A snapshots 2>/dev/null)" ]; then
+            echo "No baseline found — generating initial baseline automatically"
+            UPDATE_FLAG="--update-snapshots"
+            echo "BASELINE_MODE=First run — baseline auto-generated this run" >> $GITHUB_ENV
+          elif [ "${{ github.event.inputs.reset_baseline }}" = "true" ]; then
+            echo "Manual baseline reset requested"
+            UPDATE_FLAG="--update-snapshots"
+            echo "BASELINE_MODE=Force reset — new baseline generated this run" >> $GITHUB_ENV
+          else
+            echo "BASELINE_MODE=Compared against previous run's snapshots" >> $GITHUB_ENV
+          fi
           TEST_ENV=${{ env.TEST_ENV }} npx playwright test esc.visual esc.portal \
             --project=desktop \
             --grep "Home|Portal \[student\]" \
@@ -91,9 +101,35 @@ jobs:
           path: playwright-report/
           retention-days: 7
 
-      # ── Save new baseline when update_baseline is checked ─────────────────
+      # ── Write job summary ─────────────────────────────────────────────────
+      - name: Job summary
+        if: always()
+        run: |
+          ENV="${{ env.TEST_ENV }}"
+          case "$ENV" in
+            dev)  URL="https://drupal.dev.energysafetycanada.com" ;;
+            test) URL="https://drupal.test.energysafetycanada.com" ;;
+            uat)  URL="https://drupal.uat.energysafetycanada.com" ;;
+            beta) URL="https://beta.energysafetycanada.com" ;;
+            prod) URL="https://energysafetycanada.com" ;;
+            *)    URL="$ENV" ;;
+          esac
+          {
+            echo "## Visual Regression Test Run"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| **Environment** | \`${ENV^^}\` |"
+            echo "| **Base URL** | $URL |"
+            echo "| **Pages tested** | Home (public), Portal \[student\] |"
+            echo "| **Viewport** | Desktop — 1440 × 900 |"
+            echo "| **Baseline** | ${{ env.BASELINE_MODE }} |"
+            echo "| **Run** | [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) |"
+          } >> $GITHUB_STEP_SUMMARY
+
+      # ── Always save current run's snapshots as baseline for next run ─────
       - name: Save baseline
-        if: ${{ github.event.inputs.update_baseline == 'true' }}
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: visual-baseline

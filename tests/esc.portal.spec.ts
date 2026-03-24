@@ -27,6 +27,8 @@ import { preparePageForSnapshot } from '../helpers/page-setup';
  * Snapshot storage : ./snapshots/{TEST_ENV}/{viewport}/
  */
 
+const ENV = (process.env.TEST_ENV || 'uat').toUpperCase();
+
 const ALL_ROLES: VrRole[] = [
   'student',
   'instructor',
@@ -55,7 +57,10 @@ for (const role of ALL_ROLES) {
   test.describe(`Portal [${role}]`, () => {
     // Log in before each test. Each Playwright test gets a fresh browser
     // context so we must authenticate per test (no shared session state).
-    test.beforeEach(async ({ page }) => {
+    test.beforeEach(async ({ page }, testInfo) => {
+      const baseURL = (testInfo.project.use as { baseURL?: string }).baseURL ?? '';
+      testInfo.annotations.push({ type: 'Environment', description: `${ENV} — ${baseURL}` });
+
       // After login, Drupal may redirect to /srv/dashboard or a profile URL.
       // We use a broad pattern so loginWithoutTOTP doesn't time out waiting
       // for the default /check_logged_in=1 redirect.
