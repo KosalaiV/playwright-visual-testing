@@ -202,6 +202,14 @@ jobs:
           echo "▶ Running [$ENV] tests against last [$ENV] baseline"
           TEST_ENV=$ENV npx playwright test esc.portal --grep "$GREP" --pass-with-no-tests $UPDATE_FLAG
 
+      - name: Upload snapshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: snapshots-portal-${{ matrix.role }}
+          path: snapshots/
+          retention-days: 1
+
   # ─────────────────────────────────────────────────────────────
   # SAVE BASELINE
   # ─────────────────────────────────────────────────────────────
@@ -213,24 +221,12 @@ jobs:
       (github.event.inputs.update_baseline == 'true' && needs.public.result == 'success')
 
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          cache: 'npm'
-
-      - run: npm ci
-
       - name: Download all snapshots
         uses: actions/download-artifact@v4
         with:
           pattern: snapshots-*
           path: snapshots/
           merge-multiple: true
-
-      - name: Update snapshots (create new baseline)
-        run: TEST_ENV=${{ env.TEST_ENV }} npx playwright test --update-snapshots --pass-with-no-tests
 
       - name: Upload baseline
         uses: actions/upload-artifact@v4
