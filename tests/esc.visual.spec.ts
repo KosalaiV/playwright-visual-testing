@@ -37,8 +37,12 @@ for (const p of PUBLIC_PAGES) {
     // Pause after dismissing popups and stopping carousels before capturing.
     await page.waitForTimeout(3_000);
 
+    // Mask background videos — paused in stopCarousels() but masked as a
+    // safety net in case the first frame varies between runs.
     await expect(page).toHaveScreenshot(`${toSlug(p.name)}.png`, {
       fullPage: true,
+      mask: [page.locator('video')],
+      maskColor: '#cccccc',
     });
   });
 }

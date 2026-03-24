@@ -119,7 +119,7 @@ jobs:
           UPDATE_FLAG=""
           [ "${{ github.event.inputs.update_baseline }}" = "true" ] && UPDATE_FLAG="--update-snapshots"
           echo "▶ Running [$ENV] tests against last [$ENV] baseline"
-          TEST_ENV=$ENV npx playwright test esc.visual --shard="$SHARD" --pass-with-no-tests $UPDATE_FLAG
+          TEST_ENV=$ENV npx playwright test esc.visual --project=desktop --shard="$SHARD" --pass-with-no-tests $UPDATE_FLAG
 
       - name: Upload snapshots
         if: always()
@@ -221,7 +221,7 @@ jobs:
           UPDATE_FLAG=""
           [ "${{ github.event.inputs.update_baseline }}" = "true" ] && UPDATE_FLAG="--update-snapshots"
           echo "▶ Running [$ENV] tests against last [$ENV] baseline"
-          TEST_ENV=$ENV npx playwright test esc.portal --grep "$GREP" --pass-with-no-tests $UPDATE_FLAG
+          TEST_ENV=$ENV npx playwright test esc.portal --project=desktop --grep "$GREP" --pass-with-no-tests $UPDATE_FLAG
 
       - name: Upload snapshots
         if: always()

@@ -175,33 +175,19 @@ export async function hideChatWidgets(page: Page): Promise<void> {
 }
 
 /**
- * Kill all JS timers and freeze all animations so carousels/sliders cannot
- * advance between Playwright's consecutive screenshots.
- *
- * Strategy:
- * 1. Brute-force clear every setInterval/setTimeout by ID (works for ANY carousel library)
- * 2. Override setInterval/setTimeout so no new timers can start
- * 3. Freeze CSS animations and transitions
+ * Pause all videos and freeze CSS animations before a snapshot.
+ * The hero on the home page is a looping background video — pausing it
+ * and snapping to frame 0 ensures two consecutive screenshots are identical.
  */
 export async function stopCarousels(page: Page): Promise<void> {
   await page.evaluate(() => {
-    // Brute-force: allocate a fresh timer to get the current highest ID,
-    // then clear everything from 1 up to that ID.
-    const maxId = window.setTimeout(() => {}, 0);
-    for (let i = 1; i <= maxId; i++) {
-      window.clearInterval(i);
-      window.clearTimeout(i);
-    }
+    // Pause every video and reset to first frame for a stable screenshot.
+    document.querySelectorAll<HTMLVideoElement>('video').forEach((v) => {
+      v.pause();
+      v.currentTime = 0;
+    });
 
-    // Prevent any new timers from starting
-    window.setInterval = () => 0 as any;
-    window.setTimeout = () => 0 as any;
-
-    // Stop requestAnimationFrame-based animations (modern carousels use RAF)
-    window.requestAnimationFrame = () => 0;
-    window.cancelAnimationFrame = () => {};
-
-    // Freeze all CSS animations and transitions
+    // Freeze CSS animations and transitions as a safety net.
     const style = document.createElement('style');
     style.textContent = `*, *::before, *::after {
       animation: none !important;
@@ -211,8 +197,8 @@ export async function stopCarousels(page: Page): Promise<void> {
     document.head.appendChild(style);
   }).catch(() => {});
 
-  // Give the page one tick to settle after timers are killed
-  await page.waitForTimeout(500);
+  // Brief wait for the paused first frame to render.
+  await page.waitForTimeout(300);
 }
 
 /**

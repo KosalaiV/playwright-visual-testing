@@ -1,0 +1,102 @@
+name: Visual Test (Simple)
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment'
+        required: true
+        default: 'uat'
+        type: choice
+        options: [dev, test, uat, beta, prod]
+
+      update_baseline:
+        description: 'Generate new baseline snapshots'
+        required: false
+        default: false
+        type: boolean
+
+env:
+  TEST_ENV: ${{ github.event.inputs.environment || 'uat' }}
+
+jobs:
+
+  visual-tests:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - run: npm ci
+
+      - run: npx playwright install chromium --with-deps
+
+      # ── Clear git-committed local snapshots ──────────────────────────────
+      - name: Clear local snapshots
+        run: rm -rf snapshots/
+
+      # ── Download last saved baseline ─────────────────────────────────────
+      - name: Download baseline
+        uses: dawidd6/action-download-artifact@v6
+        continue-on-error: true
+        with:
+          name: visual-baseline
+          path: snapshots/
+          workflow: visual-test-simple.yml
+          workflow_conclusion: success
+          search_artifacts: true
+
+      - name: Debug snapshots
+        run: ls -R snapshots || echo "No baseline found — first run"
+
+      # ── Home page (public, no login) ──────────────────────────────────────
+      - name: Test — Home page
+        env:
+          HTACCESS_USER: ${{ secrets.HTACCESS_USER }}
+          HTACCESS_PASS: ${{ secrets.HTACCESS_PASS }}
+        run: |
+          UPDATE_FLAG=""
+          [ "${{ github.event.inputs.update_baseline }}" = "true" ] && UPDATE_FLAG="--update-snapshots"
+          TEST_ENV=${{ env.TEST_ENV }} npx playwright test esc.visual \
+            --project=desktop \
+            --grep "Home" \
+            $UPDATE_FLAG
+
+      # ── Student dashboard (portal, requires login) ────────────────────────
+      - name: Test — Student Dashboard
+        env:
+          HTACCESS_USER: ${{ secrets.HTACCESS_USER }}
+          HTACCESS_PASS: ${{ secrets.HTACCESS_PASS }}
+          STUDENT_USERNAME: ${{ secrets.STUDENT_USERNAME }}
+          STUDENT_PASSWORD: ${{ secrets.STUDENT_PASSWORD }}
+        run: |
+          UPDATE_FLAG=""
+          [ "${{ github.event.inputs.update_baseline }}" = "true" ] && UPDATE_FLAG="--update-snapshots"
+          TEST_ENV=${{ env.TEST_ENV }} npx playwright test esc.portal \
+            --project=desktop \
+            --grep "Portal \[student\]" \
+            $UPDATE_FLAG
+
+      # ── Upload test results on failure (for diff inspection) ─────────────
+      - name: Upload diff results
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: test-results/
+          retention-days: 3
+
+      # ── Save new baseline when update_baseline is checked ─────────────────
+      - name: Save baseline
+        if: ${{ github.event.inputs.update_baseline == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: visual-baseline
+          path: snapshots/
+          retention-days: 90
+          overwrite: true
