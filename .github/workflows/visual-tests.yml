@@ -95,7 +95,7 @@ jobs:
         uses: dawidd6/action-download-artifact@v6
         continue-on-error: true
         with:
-          name: visual-baseline-${{ env.TEST_ENV }}
+          name: visual-baseline
           path: snapshots/
           workflow: visual-tests.yml
           workflow_conclusion: success
@@ -163,7 +163,7 @@ jobs:
         uses: dawidd6/action-download-artifact@v6
         continue-on-error: true
         with:
-          name: visual-baseline-${{ env.TEST_ENV }}
+          name: visual-baseline
           path: snapshots/
           workflow: visual-tests.yml
           workflow_conclusion: success
@@ -231,7 +231,7 @@ jobs:
       - name: Upload baseline
         uses: actions/upload-artifact@v4
         with:
-          name: visual-baseline-${{ env.TEST_ENV }}
+          name: visual-baseline
           path: snapshots/
           retention-days: 90
           overwrite: true
