@@ -58,22 +58,11 @@ jobs:
       - name: Debug snapshots
         run: ls -R snapshots || echo "No baseline found — first run"
 
-      # ── Home page (public, no login) ──────────────────────────────────────
-      - name: Test — Home page
-        continue-on-error: true
-        env:
-          HTACCESS_USER: ${{ secrets.HTACCESS_USER }}
-          HTACCESS_PASS: ${{ secrets.HTACCESS_PASS }}
-        run: |
-          UPDATE_FLAG=""
-          [ "${{ github.event.inputs.update_baseline }}" = "true" ] && UPDATE_FLAG="--update-snapshots"
-          TEST_ENV=${{ env.TEST_ENV }} npx playwright test esc.visual \
-            --project=desktop \
-            --grep "Home" \
-            $UPDATE_FLAG
-
-      # ── Student dashboard (portal, requires login) ────────────────────────
-      - name: Test — Student Dashboard
+      # ── Run all tests in parallel (Playwright handles workers internally) ──
+      # Both esc.visual (Home) and esc.portal (Student Dashboard) run at the
+      # same time via fullyParallel: true + workers: 5 in playwright.config.ts.
+      # All credentials passed here so both test files can access what they need.
+      - name: Run visual tests
         continue-on-error: true
         env:
           HTACCESS_USER: ${{ secrets.HTACCESS_USER }}
@@ -83,9 +72,9 @@ jobs:
         run: |
           UPDATE_FLAG=""
           [ "${{ github.event.inputs.update_baseline }}" = "true" ] && UPDATE_FLAG="--update-snapshots"
-          TEST_ENV=${{ env.TEST_ENV }} npx playwright test esc.portal \
+          TEST_ENV=${{ env.TEST_ENV }} npx playwright test esc.visual esc.portal \
             --project=desktop \
-            --grep "Portal \[student\]" \
+            --grep "Home|Portal \[student\]" \
             $UPDATE_FLAG
 
       # ── Merge blob reports into one consolidated HTML report ──────────────
