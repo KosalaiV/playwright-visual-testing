@@ -50,6 +50,7 @@ export default defineConfig({
     ? [
         ['blob'],
         ['github'],
+        ['html', { open: 'never', outputFolder: 'playwright-report' }],
       ]
     : [['html', { open: 'never' }]],
 

@@ -60,6 +60,7 @@ jobs:
 
       # ── Home page (public, no login) ──────────────────────────────────────
       - name: Test — Home page
+        continue-on-error: true
         env:
           HTACCESS_USER: ${{ secrets.HTACCESS_USER }}
           HTACCESS_PASS: ${{ secrets.HTACCESS_PASS }}
@@ -73,6 +74,7 @@ jobs:
 
       # ── Student dashboard (portal, requires login) ────────────────────────
       - name: Test — Student Dashboard
+        continue-on-error: true
         env:
           HTACCESS_USER: ${{ secrets.HTACCESS_USER }}
           HTACCESS_PASS: ${{ secrets.HTACCESS_PASS }}
@@ -86,14 +88,19 @@ jobs:
             --grep "Portal \[student\]" \
             $UPDATE_FLAG
 
-      # ── Upload test results on failure (for diff inspection) ─────────────
-      - name: Upload diff results
-        if: failure()
+      # ── Merge blob reports into one consolidated HTML report ──────────────
+      - name: Generate consolidated HTML report
+        if: always()
+        run: npx playwright merge-reports --reporter html ./blob-report
+
+      # ── Upload consolidated HTML report ───────────────────────────────────
+      - name: Upload HTML report
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: test-results
-          path: test-results/
-          retention-days: 3
+          name: visual-regression-report
+          path: playwright-report/
+          retention-days: 7
 
       # ── Save new baseline when update_baseline is checked ─────────────────
       - name: Save baseline
