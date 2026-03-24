@@ -90,6 +90,10 @@ jobs:
 
       - run: npx playwright install-deps chromium
 
+      # Clear any git-committed local snapshots — CI uses artifact-based baselines only
+      - name: Clear local snapshots
+        run: rm -rf snapshots/
+
       # 🔥 Download baseline (from selected env)
       - name: Download baseline
         uses: dawidd6/action-download-artifact@v6
@@ -161,6 +165,10 @@ jobs:
           key: playwright-${{ runner.os }}-${{ needs.setup.outputs.playwright-version }}
 
       - run: npx playwright install-deps chromium
+
+      # Clear any git-committed local snapshots — CI uses artifact-based baselines only
+      - name: Clear local snapshots
+        run: rm -rf snapshots/
 
       - name: Download baseline
         uses: dawidd6/action-download-artifact@v6
