@@ -27,18 +27,30 @@ for (const p of PUBLIC_PAGES) {
   test(p.name, async ({ page }) => {
     test.setTimeout(120_000);
 
+    // Install fake clock BEFORE navigation so all JS timers (setInterval,
+    // setTimeout, requestAnimationFrame) are intercepted from the very first
+    // script execution — including carousel auto-play initialisation.
+    // The clock starts paused, so no timer callbacks fire automatically.
+    await page.clock.install();
+
     await page.goto(p.path, { waitUntil: 'load', timeout: 90_000 });
 
-    // Let the page fully settle (hero carousel, lazy images, JS widgets).
-    await page.waitForTimeout(5_000);
+    // Advance fake clock by 5s to flush any deferred renders / lazy-load
+    // callbacks that fire shortly after page load, without actually waiting 5s.
+    await page.clock.runFor(5_000);
 
     await preparePageForSnapshot(page);
 
-    // Pause after dismissing popups and stopping carousels before capturing.
-    await page.waitForTimeout(3_000);
+    // Freeze the clock — no more timer callbacks will ever fire again.
+    // The carousel is now permanently stuck on the current slide.
+    await page.clock.pauseAt(new Date());
+
+    // Brief real-time settle before capture.
+    await page.waitForTimeout(500);
 
     await expect(page).toHaveScreenshot(`${toSlug(p.name)}.png`, {
       fullPage: true,
+      timeout: 30_000,
     });
   });
 }
