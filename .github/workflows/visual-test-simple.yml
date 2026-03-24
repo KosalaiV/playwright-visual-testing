@@ -44,8 +44,9 @@ jobs:
       - name: Clear local snapshots
         run: rm -rf snapshots/
 
-      # ── Download last saved baseline ─────────────────────────────────────
+      # ── Download last saved baseline (skipped when resetting) ─────────────
       - name: Download baseline
+        if: ${{ github.event.inputs.reset_baseline != 'true' }}
         uses: dawidd6/action-download-artifact@v6
         continue-on-error: true
         with:
@@ -56,12 +57,21 @@ jobs:
           search_artifacts: true
 
       - name: Debug snapshots
-        run: ls -R snapshots || echo "No baseline found — first run"
+        run: |
+          if [ -d "snapshots" ] && [ -n "$(ls -A snapshots 2>/dev/null)" ]; then
+            echo "Baseline loaded:"
+            ls -R snapshots
+          else
+            echo "No baseline found — first run, all snapshots will be created"
+          fi
 
       # ── Run all tests in parallel (Playwright handles workers internally) ──
-      # Both esc.visual (Home) and esc.portal (Student Dashboard) run at the
-      # same time via fullyParallel: true + workers: 5 in playwright.config.ts.
-      # All credentials passed here so both test files can access what they need.
+      # --update-snapshots=changed: takes new screenshots every run and writes
+      # them back to snapshots/ so the saved baseline always reflects the
+      # latest run. Tests still FAIL when screenshots change, so you get real
+      # failure signal in the report. On first run (no baseline), all snapshots
+      # are created. On reset_baseline runs the download is skipped above so
+      # everything is regenerated fresh.
       - name: Run visual tests
         continue-on-error: true
         env:
@@ -70,22 +80,17 @@ jobs:
           STUDENT_USERNAME: ${{ secrets.STUDENT_USERNAME }}
           STUDENT_PASSWORD: ${{ secrets.STUDENT_PASSWORD }}
         run: |
-          UPDATE_FLAG=""
-          if [ ! -d "snapshots" ] || [ -z "$(ls -A snapshots 2>/dev/null)" ]; then
-            echo "No baseline found — generating initial baseline automatically"
-            UPDATE_FLAG="--update-snapshots"
-            echo "BASELINE_MODE=First run — baseline auto-generated this run" >> $GITHUB_ENV
-          elif [ "${{ github.event.inputs.reset_baseline }}" = "true" ]; then
-            echo "Manual baseline reset requested"
-            UPDATE_FLAG="--update-snapshots"
-            echo "BASELINE_MODE=Force reset — new baseline generated this run" >> $GITHUB_ENV
+          if [ "${{ github.event.inputs.reset_baseline }}" = "true" ]; then
+            echo "BASELINE_MODE=Force reset — fresh baseline generated this run" >> $GITHUB_ENV
+          elif [ ! -d "snapshots" ] || [ -z "$(ls -A snapshots 2>/dev/null)" ]; then
+            echo "BASELINE_MODE=First run — baseline created this run" >> $GITHUB_ENV
           else
-            echo "BASELINE_MODE=Compared against previous run's snapshots" >> $GITHUB_ENV
+            echo "BASELINE_MODE=Compared against previous run ($(find snapshots -name '*.png' | wc -l | tr -d ' ') snapshots)" >> $GITHUB_ENV
           fi
           TEST_ENV=${{ env.TEST_ENV }} npx playwright test esc.visual esc.portal \
             --project=desktop \
             --grep "Home|Portal \[student\]" \
-            $UPDATE_FLAG
+            --update-snapshots=changed
 
       # ── Merge blob reports into one consolidated HTML report ──────────────
       - name: Generate consolidated HTML report
