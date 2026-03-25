@@ -63,7 +63,7 @@ export default defineConfig({
 
     headless: process.env.HEADED !== '1',
 
-    screenshot: 'on',
+    screenshot: 'off',
 
     ignoreHTTPSErrors: ENV !== 'prod',
 
