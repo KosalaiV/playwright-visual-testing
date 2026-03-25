@@ -17,7 +17,7 @@ on:
         type: boolean
 
 permissions:
-  actions: read
+  actions:  read
   contents: read
 
 env:
@@ -50,10 +50,9 @@ jobs:
         uses: dawidd6/action-download-artifact@v6
         continue-on-error: true
         with:
-          name: visual-baseline
+          name: visual-baseline-${{ env.TEST_ENV }}
           path: snapshots/
           workflow: visual-test-simple.yml
-          workflow_conclusion: success
           search_artifacts: true
 
       - name: Debug snapshots
@@ -65,13 +64,7 @@ jobs:
             echo "No baseline found — first run, all snapshots will be created"
           fi
 
-      # ── Run all tests in parallel (Playwright handles workers internally) ──
-      # --update-snapshots=changed: takes new screenshots every run and writes
-      # them back to snapshots/ so the saved baseline always reflects the
-      # latest run. Tests still FAIL when screenshots change, so you get real
-      # failure signal in the report. On first run (no baseline), all snapshots
-      # are created. On reset_baseline runs the download is skipped above so
-      # everything is regenerated fresh.
+      # ── Run tests — capture exit code for Slack status ───────────────────
       - name: Run visual tests
         continue-on-error: true
         env:
@@ -87,37 +80,123 @@ jobs:
           else
             echo "BASELINE_MODE=Compared against previous run ($(find snapshots -name '*.png' | wc -l | tr -d ' ') snapshots)" >> $GITHUB_ENV
           fi
-          TEST_ENV=${{ env.TEST_ENV }} npx playwright test esc.visual esc.portal \
+
+          if TEST_ENV=${{ env.TEST_ENV }} npx playwright test esc.visual esc.portal \
             --project=desktop \
             --grep "Home|Portal \[student\]" \
-            --update-snapshots=changed
+            --update-snapshots=changed; then
+            echo "TEST_STATUS=passed" >> $GITHUB_ENV
+          else
+            echo "TEST_STATUS=failed" >> $GITHUB_ENV
+          fi
 
       # ── Merge blob reports into one consolidated HTML report ──────────────
-      - name: Generate consolidated HTML report
+      - name: Generate HTML report
         if: always()
         run: npx playwright merge-reports --reporter html ./blob-report
 
-      # ── Upload consolidated HTML report ───────────────────────────────────
-      - name: Upload HTML report
+      # ── Deploy HTML report to Cloudflare Pages ────────────────────────────
+      # Each environment is deployed as its own branch alias, giving a stable
+      # per-environment URL: https://{env}.{project}.pages.dev
+      - name: Deploy to Cloudflare Pages
         if: always()
-        uses: actions/upload-artifact@v4
+        id: cf-deploy
+        uses: cloudflare/pages-action@v1
+        continue-on-error: true
         with:
-          name: visual-regression-report
-          path: playwright-report/
-          retention-days: 7
+          apiToken:    ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId:   ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          projectName: ${{ secrets.CF_PAGES_PROJECT }}
+          directory:   playwright-report
+          branch:      ${{ env.TEST_ENV }}
+
+      # ── Post to Slack ─────────────────────────────────────────────────────
+      - name: Notify Slack
+        if: always()
+        continue-on-error: true
+        env:
+          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          ENV="${{ env.TEST_ENV }}"
+          STATUS="${{ env.TEST_STATUS }}"
+          REPORT_URL="${{ steps.cf-deploy.outputs.alias || steps.cf-deploy.outputs.url }}"
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+          if [ "$STATUS" = "passed" ]; then
+            ICON="✅"
+            COLOR="#22c55e"
+            STATUS_LABEL="All tests passed"
+          else
+            ICON="❌"
+            COLOR="#ef4444"
+            STATUS_LABEL="Tests failed — visual differences detected"
+          fi
+
+          # Build the Slack Block Kit payload
+          PAYLOAD=$(cat <<JSON
+          {
+            "text": "${ICON} Visual Regression — ${ENV^^} — ${STATUS_LABEL}",
+            "attachments": [
+              {
+                "color": "${COLOR}",
+                "blocks": [
+                  {
+                    "type": "header",
+                    "text": {
+                      "type": "plain_text",
+                      "text": "🎭 Visual Regression Report",
+                      "emoji": true
+                    }
+                  },
+                  {
+                    "type": "section",
+                    "fields": [
+                      { "type": "mrkdwn", "text": "*Environment*\n\`${ENV^^}\`" },
+                      { "type": "mrkdwn", "text": "*Status*\n${ICON} ${STATUS_LABEL}" },
+                      { "type": "mrkdwn", "text": "*Branch*\n\`${{ github.ref_name }}\`" },
+                      { "type": "mrkdwn", "text": "*Baseline*\n${{ env.BASELINE_MODE }}" }
+                    ]
+                  },
+                  {
+                    "type": "actions",
+                    "elements": [
+                      {
+                        "type": "button",
+                        "text": { "type": "plain_text", "text": "📊 View HTML Report", "emoji": true },
+                        "url": "${REPORT_URL}",
+                        "style": "primary"
+                      },
+                      {
+                        "type": "button",
+                        "text": { "type": "plain_text", "text": "⚙️ View Run #${{ github.run_number }}", "emoji": true },
+                        "url": "${RUN_URL}"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+          JSON
+          )
+
+          curl -s -X POST "$SLACK_WEBHOOK" \
+            -H 'Content-Type: application/json' \
+            -d "$PAYLOAD"
 
       # ── Write job summary ─────────────────────────────────────────────────
       - name: Job summary
         if: always()
         run: |
           ENV="${{ env.TEST_ENV }}"
+          REPORT_URL="${{ steps.cf-deploy.outputs.alias || steps.cf-deploy.outputs.url }}"
           case "$ENV" in
-            dev)  URL="https://drupal.dev.energysafetycanada.com" ;;
-            test) URL="https://drupal.test.energysafetycanada.com" ;;
-            uat)  URL="https://drupal.uat.energysafetycanada.com" ;;
-            beta) URL="https://beta.energysafetycanada.com" ;;
-            prod) URL="https://energysafetycanada.com" ;;
-            *)    URL="$ENV" ;;
+            dev)  BASE_URL="https://drupal.dev.energysafetycanada.com" ;;
+            test) BASE_URL="https://drupal.test.energysafetycanada.com" ;;
+            uat)  BASE_URL="https://drupal.uat.energysafetycanada.com" ;;
+            beta) BASE_URL="https://beta.energysafetycanada.com" ;;
+            prod) BASE_URL="https://energysafetycanada.com" ;;
+            *)    BASE_URL="$ENV" ;;
           esac
           {
             echo "## Visual Regression Test Run"
@@ -125,11 +204,15 @@ jobs:
             echo "| | |"
             echo "|---|---|"
             echo "| **Environment** | \`${ENV^^}\` |"
-            echo "| **Base URL** | $URL |"
+            echo "| **Base URL** | $BASE_URL |"
             echo "| **Pages tested** | Home (public), Portal \[student\] |"
             echo "| **Viewport** | Desktop — 1440 × 900 |"
             echo "| **Baseline** | ${{ env.BASELINE_MODE }} |"
+            echo "| **Status** | ${{ env.TEST_STATUS == 'passed' && '✅ Passed' || '❌ Failed' }} |"
             echo "| **Run** | [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) |"
+            if [ -n "$REPORT_URL" ]; then
+              echo "| **HTML Report** | [$REPORT_URL]($REPORT_URL) |"
+            fi
           } >> $GITHUB_STEP_SUMMARY
 
       # ── Always save current run's snapshots as baseline for next run ─────
@@ -137,7 +220,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: visual-baseline
+          name: visual-baseline-${{ env.TEST_ENV }}
           path: snapshots/
           retention-days: 90
           overwrite: true
