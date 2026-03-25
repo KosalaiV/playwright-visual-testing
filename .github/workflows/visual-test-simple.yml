@@ -55,13 +55,30 @@ jobs:
           workflow: visual-test-simple.yml
           search_artifacts: true
 
-      - name: Debug snapshots
+      # ── Read baseline metadata to know which env/run it came from ─────────
+      - name: Read baseline metadata
         run: |
-          if [ -d "snapshots" ] && [ -n "$(ls -A snapshots 2>/dev/null)" ]; then
-            echo "Baseline loaded:"
-            ls -R snapshots
+          META="snapshots/baseline-meta.json"
+          if [ -f "$META" ]; then
+            PREV_ENV=$(jq -r '.env   // "unknown"'    "$META")
+            PREV_RUN=$(jq -r '.run_number // "?"'     "$META")
+            PREV_DATE=$(jq -r '.date // "unknown"'    "$META")
+            echo "PREV_ENV=$PREV_ENV"   >> $GITHUB_ENV
+            echo "PREV_RUN=$PREV_RUN"   >> $GITHUB_ENV
+            echo "PREV_DATE=$PREV_DATE" >> $GITHUB_ENV
+            echo "Baseline is from: ${PREV_ENV^^} — Run #${PREV_RUN} — ${PREV_DATE}"
+            SNAPSHOT_COUNT=$(find snapshots -name '*.png' | wc -l | tr -d ' ')
+            echo "BASELINE_MODE=Comparing ${PREV_ENV^^} (Run #${PREV_RUN}) → ${{ env.TEST_ENV }}^^  (${SNAPSHOT_COUNT} snapshots)" >> $GITHUB_ENV
           else
-            echo "No baseline found — first run, all snapshots will be created"
+            echo "PREV_ENV=none"  >> $GITHUB_ENV
+            echo "PREV_RUN="      >> $GITHUB_ENV
+            echo "PREV_DATE="     >> $GITHUB_ENV
+            echo "No baseline metadata found — first run or reset"
+            if [ "${{ github.event.inputs.reset_baseline }}" = "true" ]; then
+              echo "BASELINE_MODE=Force reset — fresh baseline generated this run" >> $GITHUB_ENV
+            else
+              echo "BASELINE_MODE=First run — baseline created this run" >> $GITHUB_ENV
+            fi
           fi
 
       # ── Run tests — capture exit code for Slack status ───────────────────
@@ -73,14 +90,6 @@ jobs:
           STUDENT_USERNAME: ${{ secrets.STUDENT_USERNAME }}
           STUDENT_PASSWORD: ${{ secrets.STUDENT_PASSWORD }}
         run: |
-          if [ "${{ github.event.inputs.reset_baseline }}" = "true" ]; then
-            echo "BASELINE_MODE=Force reset — fresh baseline generated this run" >> $GITHUB_ENV
-          elif [ ! -d "snapshots" ] || [ -z "$(ls -A snapshots 2>/dev/null)" ]; then
-            echo "BASELINE_MODE=First run — baseline created this run" >> $GITHUB_ENV
-          else
-            echo "BASELINE_MODE=Compared against previous run ($(find snapshots -name '*.png' | wc -l | tr -d ' ') snapshots)" >> $GITHUB_ENV
-          fi
-
           if TEST_ENV=${{ env.TEST_ENV }} npx playwright test esc.visual esc.portal \
             --project=desktop \
             --grep "Home|Portal \[student\]" \
@@ -90,14 +99,29 @@ jobs:
             echo "TEST_STATUS=failed" >> $GITHUB_ENV
           fi
 
+      # ── Write baseline metadata for the next run ──────────────────────────
+      - name: Write baseline metadata
+        if: always()
+        run: |
+          mkdir -p snapshots
+          cat <<EOF > snapshots/baseline-meta.json
+          {
+            "env":        "${{ env.TEST_ENV }}",
+            "run_number": "${{ github.run_number }}",
+            "run_id":     "${{ github.run_id }}",
+            "branch":     "${{ github.ref_name }}",
+            "date":       "$(date -u '+%Y-%m-%d %H:%M UTC')"
+          }
+          EOF
+          echo "Baseline metadata written for next run:"
+          cat snapshots/baseline-meta.json
+
       # ── Merge blob reports into one consolidated HTML report ──────────────
       - name: Generate HTML report
         if: always()
         run: npx playwright merge-reports --reporter html ./blob-report
 
       # ── Deploy HTML report to Cloudflare Pages ────────────────────────────
-      # Each environment is deployed as its own branch alias, giving a stable
-      # per-environment URL: https://{env}.{project}.pages.dev
       - name: Deploy to Cloudflare Pages
         if: always()
         id: cf-deploy
@@ -119,6 +143,8 @@ jobs:
         run: |
           ENV="${{ env.TEST_ENV }}"
           STATUS="${{ env.TEST_STATUS }}"
+          PREV_ENV="${{ env.PREV_ENV }}"
+          PREV_RUN="${{ env.PREV_RUN }}"
           REPORT_URL="${{ steps.cf-deploy.outputs.alias || steps.cf-deploy.outputs.url }}"
           RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
 
@@ -129,13 +155,19 @@ jobs:
           else
             ICON="❌"
             COLOR="#ef4444"
-            STATUS_LABEL="Tests failed — visual differences detected"
+            STATUS_LABEL="Visual differences detected"
           fi
 
-          # Build the Slack Block Kit payload
+          # Comparison label e.g.  "UAT #41  →  BETA #42"
+          if [ "$PREV_ENV" = "none" ] || [ -z "$PREV_ENV" ]; then
+            COMPARING="First run — no baseline yet"
+          else
+            COMPARING="${PREV_ENV^^} (Run #${PREV_RUN})  →  ${ENV^^} (Run #${{ github.run_number }})"
+          fi
+
           PAYLOAD=$(cat <<JSON
           {
-            "text": "${ICON} Visual Regression — ${ENV^^} — ${STATUS_LABEL}",
+            "text": "${ICON} Visual Regression — ${COMPARING} — ${STATUS_LABEL}",
             "attachments": [
               {
                 "color": "${COLOR}",
@@ -151,10 +183,10 @@ jobs:
                   {
                     "type": "section",
                     "fields": [
-                      { "type": "mrkdwn", "text": "*Environment*\n\`${ENV^^}\`" },
+                      { "type": "mrkdwn", "text": "*Comparing*\n\`${COMPARING}\`" },
                       { "type": "mrkdwn", "text": "*Status*\n${ICON} ${STATUS_LABEL}" },
-                      { "type": "mrkdwn", "text": "*Branch*\n\`${{ github.ref_name }}\`" },
-                      { "type": "mrkdwn", "text": "*Baseline*\n${{ env.BASELINE_MODE }}" }
+                      { "type": "mrkdwn", "text": "*Current env*\n\`${ENV^^}\`" },
+                      { "type": "mrkdwn", "text": "*Branch*\n\`${{ github.ref_name }}\`" }
                     ]
                   },
                   {
@@ -189,6 +221,9 @@ jobs:
         if: always()
         run: |
           ENV="${{ env.TEST_ENV }}"
+          PREV_ENV="${{ env.PREV_ENV }}"
+          PREV_RUN="${{ env.PREV_RUN }}"
+          PREV_DATE="${{ env.PREV_DATE }}"
           REPORT_URL="${{ steps.cf-deploy.outputs.alias || steps.cf-deploy.outputs.url }}"
           case "$ENV" in
             dev)  BASE_URL="https://drupal.dev.energysafetycanada.com" ;;
@@ -198,16 +233,23 @@ jobs:
             prod) BASE_URL="https://energysafetycanada.com" ;;
             *)    BASE_URL="$ENV" ;;
           esac
+
+          if [ "$PREV_ENV" = "none" ] || [ -z "$PREV_ENV" ]; then
+            COMPARING="First run — baseline created"
+          else
+            COMPARING="\`${PREV_ENV^^}\` Run #${PREV_RUN} (${PREV_DATE})  →  \`${ENV^^}\` Run #${{ github.run_number }}"
+          fi
+
           {
             echo "## Visual Regression Test Run"
             echo ""
             echo "| | |"
             echo "|---|---|"
-            echo "| **Environment** | \`${ENV^^}\` |"
+            echo "| **Comparing** | ${COMPARING} |"
+            echo "| **Current environment** | \`${ENV^^}\` |"
             echo "| **Base URL** | $BASE_URL |"
             echo "| **Pages tested** | Home (public), Portal \[student\] |"
             echo "| **Viewport** | Desktop — 1440 × 900 |"
-            echo "| **Baseline** | ${{ env.BASELINE_MODE }} |"
             echo "| **Status** | ${{ env.TEST_STATUS == 'passed' && '✅ Passed' || '❌ Failed' }} |"
             echo "| **Run** | [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) |"
             if [ -n "$REPORT_URL" ]; then
