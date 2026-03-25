@@ -84,7 +84,8 @@ jobs:
             echo "prev_date=$PREV_DATE" >> $GITHUB_OUTPUT
             SNAPSHOT_COUNT=$(find snapshots -name '*.png' | wc -l | tr -d ' ')
             echo "Baseline is from: ${PREV_ENV^^} — Run #${PREV_RUN} — ${PREV_DATE} (${SNAPSHOT_COUNT} snapshots)"
-            echo "baseline_mode=Comparing ${PREV_ENV^^} (Run #${PREV_RUN}) → ${{ env.TEST_ENV }^^} (${SNAPSHOT_COUNT} snapshots)" >> $GITHUB_OUTPUT
+            CURR_ENV="${{ env.TEST_ENV }}"
+            echo "baseline_mode=Comparing ${PREV_ENV^^} (Run #${PREV_RUN}) → ${CURR_ENV^^} (${SNAPSHOT_COUNT} snapshots)" >> $GITHUB_OUTPUT
           else
             echo "prev_env=none"  >> $GITHUB_OUTPUT
             echo "prev_run="      >> $GITHUB_OUTPUT
