@@ -81,7 +81,7 @@ jobs:
             fi
           fi
 
-      # ── Run tests — capture exit code for Slack status ───────────────────
+      # ── Run tests — NO --update-snapshots so diffs appear in report ────────
       - name: Run visual tests
         continue-on-error: true
         env:
@@ -92,12 +92,28 @@ jobs:
         run: |
           if TEST_ENV=${{ env.TEST_ENV }} npx playwright test esc.visual esc.portal \
             --project=desktop \
-            --grep "Home|Portal \[student\]" \
-            --update-snapshots=changed; then
+            --grep "Home|Portal \[student\]"; then
             echo "TEST_STATUS=passed" >> $GITHUB_ENV
           else
             echo "TEST_STATUS=failed" >> $GITHUB_ENV
           fi
+
+      # ── Refresh snapshots so current run becomes baseline for next run ────
+      # Uses --reporter=line to avoid overwriting the blob report we just captured.
+      # --update-snapshots=all silently writes current screenshots to snapshots/.
+      - name: Update baseline snapshots
+        if: always()
+        env:
+          HTACCESS_USER: ${{ secrets.HTACCESS_USER }}
+          HTACCESS_PASS: ${{ secrets.HTACCESS_PASS }}
+          STUDENT_USERNAME: ${{ secrets.STUDENT_USERNAME }}
+          STUDENT_PASSWORD: ${{ secrets.STUDENT_PASSWORD }}
+        run: |
+          TEST_ENV=${{ env.TEST_ENV }} npx playwright test esc.visual esc.portal \
+            --project=desktop \
+            --grep "Home|Portal \[student\]" \
+            --reporter=line \
+            --update-snapshots=all || true
 
       # ── Write baseline metadata for the next run ──────────────────────────
       - name: Write baseline metadata
