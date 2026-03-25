@@ -77,12 +77,12 @@ for (const role of ALL_ROLES) {
         await page.goto(vrPage.path, { waitUntil: 'load', timeout: 90_000 });
 
         // Let the portal page settle (dynamic widgets, lazy content).
-        await page.waitForTimeout(3_000);
+        await page.waitForTimeout(8_000);
 
         await preparePageForSnapshot(page);
 
         // Brief pause after dismissing popups before capturing.
-        await page.waitForTimeout(1_000);
+        await page.waitForTimeout(8_000);
 
         await expect(page).toHaveScreenshot(
           `${toSlug(vrPage.name)}-${role}.png`,

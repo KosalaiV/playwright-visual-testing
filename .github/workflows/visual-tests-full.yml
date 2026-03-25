@@ -1,0 +1,516 @@
+name: Visual Tests (Full Suite)
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment'
+        required: true
+        default: 'uat'
+        type: choice
+        options: [dev, test, uat, beta, prod]
+
+      reset_baseline:
+        description: 'Force reset baseline (ignore previous run)'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  actions:  read
+  contents: read
+
+env:
+  TEST_ENV: ${{ github.event.inputs.environment || 'uat' }}
+
+# ─────────────────────────────────────────────────────────────────────────────
+
+jobs:
+
+  # ── 1. SETUP ────────────────────────────────────────────────────────────────
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      prev_env:      ${{ steps.meta.outputs.prev_env }}
+      prev_run:      ${{ steps.meta.outputs.prev_run }}
+      prev_date:     ${{ steps.meta.outputs.prev_date }}
+      baseline_mode: ${{ steps.meta.outputs.baseline_mode }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - run: npm ci
+
+      - run: npx playwright install chromium --with-deps
+
+      # Cache playwright binaries for test jobs
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ hashFiles('package-lock.json') }}
+
+      # Clear any git-committed snapshots
+      - name: Clear local snapshots
+        run: rm -rf snapshots/
+
+      # Download last saved baseline (skipped when resetting)
+      - name: Download baseline
+        if: ${{ github.event.inputs.reset_baseline != 'true' }}
+        uses: dawidd6/action-download-artifact@v6
+        continue-on-error: true
+        with:
+          name: visual-baseline
+          path: snapshots/
+          workflow: visual-tests-full.yml
+          search_artifacts: true
+
+      # Read baseline metadata
+      - name: Read baseline metadata
+        id: meta
+        run: |
+          META="snapshots/baseline-meta.json"
+          if [ -f "$META" ]; then
+            PREV_ENV=$(jq -r '.env   // "unknown"' "$META")
+            PREV_RUN=$(jq -r '.run_number // "?"'  "$META")
+            PREV_DATE=$(jq -r '.date // "unknown"' "$META")
+            echo "prev_env=$PREV_ENV"   >> $GITHUB_OUTPUT
+            echo "prev_run=$PREV_RUN"   >> $GITHUB_OUTPUT
+            echo "prev_date=$PREV_DATE" >> $GITHUB_OUTPUT
+            SNAPSHOT_COUNT=$(find snapshots -name '*.png' | wc -l | tr -d ' ')
+            echo "Baseline is from: ${PREV_ENV^^} — Run #${PREV_RUN} — ${PREV_DATE} (${SNAPSHOT_COUNT} snapshots)"
+            echo "baseline_mode=Comparing ${PREV_ENV^^} (Run #${PREV_RUN}) → ${{ env.TEST_ENV }^^} (${SNAPSHOT_COUNT} snapshots)" >> $GITHUB_OUTPUT
+          else
+            echo "prev_env=none"  >> $GITHUB_OUTPUT
+            echo "prev_run="      >> $GITHUB_OUTPUT
+            echo "prev_date="     >> $GITHUB_OUTPUT
+            echo "No baseline metadata — first run or reset"
+            if [ "${{ github.event.inputs.reset_baseline }}" = "true" ]; then
+              echo "baseline_mode=Force reset — fresh baseline generated this run" >> $GITHUB_OUTPUT
+            else
+              echo "baseline_mode=First run — baseline created this run" >> $GITHUB_OUTPUT
+            fi
+          fi
+
+      # Share the downloaded baseline with all test jobs via a run-scoped artifact
+      - name: Upload run-baseline for test jobs
+        uses: actions/upload-artifact@v4
+        with:
+          name: run-baseline
+          path: snapshots/
+          retention-days: 1
+          overwrite: true
+
+  # ── 2a. PUBLIC PAGES — sharded 3-way ────────────────────────────────────────
+  test-public:
+    needs: setup
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - run: npm ci
+
+      - name: Restore Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ hashFiles('package-lock.json') }}
+
+      - name: Install Playwright (if cache miss)
+        run: npx playwright install chromium --with-deps
+
+      - name: Download run-baseline
+        uses: actions/download-artifact@v4
+        with:
+          name: run-baseline
+          path: snapshots/
+
+      # ── Run tests (captures diffs in blob report) ──
+      - name: Run public tests (shard ${{ matrix.shard }}/3)
+        continue-on-error: true
+        env:
+          HTACCESS_USER: ${{ secrets.HTACCESS_USER }}
+          HTACCESS_PASS: ${{ secrets.HTACCESS_PASS }}
+        run: |
+          TEST_ENV=${{ env.TEST_ENV }} npx playwright test esc.visual \
+            --shard=${{ matrix.shard }}/3 || true
+
+      # ── Update baseline (second pass — doesn't affect blob report) ──
+      - name: Update baseline snapshots
+        if: always()
+        env:
+          HTACCESS_USER: ${{ secrets.HTACCESS_USER }}
+          HTACCESS_PASS: ${{ secrets.HTACCESS_PASS }}
+        run: |
+          touch /tmp/update-ts
+          TEST_ENV=${{ env.TEST_ENV }} npx playwright test esc.visual \
+            --shard=${{ matrix.shard }}/3 \
+            --reporter=line \
+            --update-snapshots=all || true
+
+      # Upload blob report for merge step
+      - name: Upload blob report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: blob-report-public-${{ matrix.shard }}
+          path: blob-report/
+          retention-days: 1
+          overwrite: true
+
+      # Upload only snapshots modified by this job
+      - name: Upload updated snapshots
+        if: always()
+        run: |
+          find snapshots -name '*.png' -newer /tmp/update-ts > /tmp/changed-snaps.txt
+          echo "Changed snapshots: $(wc -l < /tmp/changed-snaps.txt)"
+          cat /tmp/changed-snaps.txt
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: updated-snaps-public-${{ matrix.shard }}
+          path: snapshots/
+          retention-days: 1
+          overwrite: true
+
+  # ── 2b. PORTAL PAGES — one job per role ─────────────────────────────────────
+  test-portal:
+    needs: setup
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        role:
+          - student
+          - instructor
+          - companyadmin
+          - provider
+          - multirole
+          - evaluator
+          - auditor
+          - assessor
+          - contenteditor
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - run: npm ci
+
+      - name: Restore Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ hashFiles('package-lock.json') }}
+
+      - name: Install Playwright (if cache miss)
+        run: npx playwright install chromium --with-deps
+
+      - name: Download run-baseline
+        uses: actions/download-artifact@v4
+        with:
+          name: run-baseline
+          path: snapshots/
+
+      # ── Run tests (captures diffs in blob report) ──
+      - name: Run portal tests [${{ matrix.role }}]
+        continue-on-error: true
+        env:
+          HTACCESS_USER: ${{ secrets.HTACCESS_USER }}
+          HTACCESS_PASS: ${{ secrets.HTACCESS_PASS }}
+          STUDENT_USERNAME:      ${{ secrets.STUDENT_USERNAME }}
+          STUDENT_PASSWORD:      ${{ secrets.STUDENT_PASSWORD }}
+          INSTRUCTOR_USERNAME:   ${{ secrets.INSTRUCTOR_USERNAME }}
+          INSTRUCTOR_PASSWORD:   ${{ secrets.INSTRUCTOR_PASSWORD }}
+          COMPANYADMIN_USERNAME: ${{ secrets.COMPANYADMIN_USERNAME }}
+          COMPANYADMIN_PASSWORD: ${{ secrets.COMPANYADMIN_PASSWORD }}
+          PROVIDER_USERNAME:     ${{ secrets.PROVIDER_USERNAME }}
+          PROVIDER_PASSWORD:     ${{ secrets.PROVIDER_PASSWORD }}
+          MULTIROLE_USERNAME:    ${{ secrets.MULTIROLE_USERNAME }}
+          MULTIROLE_PASSWORD:    ${{ secrets.MULTIROLE_PASSWORD }}
+          EVALUATOR_USERNAME:    ${{ secrets.EVALUATOR_USERNAME }}
+          EVALUATOR_PASSWORD:    ${{ secrets.EVALUATOR_PASSWORD }}
+          AUDITOR_USERNAME:      ${{ secrets.AUDITOR_USERNAME }}
+          AUDITOR_PASSWORD:      ${{ secrets.AUDITOR_PASSWORD }}
+          ASSESSOR_USERNAME:     ${{ secrets.ASSESSOR_USERNAME }}
+          ASSESSOR_PASSWORD:     ${{ secrets.ASSESSOR_PASSWORD }}
+          CONTENTEDITOR_USERNAME: ${{ secrets.CONTENTEDITOR_USERNAME }}
+          CONTENTEDITOR_PASSWORD: ${{ secrets.CONTENTEDITOR_PASSWORD }}
+        run: |
+          TEST_ENV=${{ env.TEST_ENV }} npx playwright test esc.portal \
+            --project=desktop \
+            --grep "Portal \[${{ matrix.role }}\]" || true
+
+      # ── Update baseline (second pass) ──
+      - name: Update baseline snapshots [${{ matrix.role }}]
+        if: always()
+        env:
+          HTACCESS_USER: ${{ secrets.HTACCESS_USER }}
+          HTACCESS_PASS: ${{ secrets.HTACCESS_PASS }}
+          STUDENT_USERNAME:      ${{ secrets.STUDENT_USERNAME }}
+          STUDENT_PASSWORD:      ${{ secrets.STUDENT_PASSWORD }}
+          INSTRUCTOR_USERNAME:   ${{ secrets.INSTRUCTOR_USERNAME }}
+          INSTRUCTOR_PASSWORD:   ${{ secrets.INSTRUCTOR_PASSWORD }}
+          COMPANYADMIN_USERNAME: ${{ secrets.COMPANYADMIN_USERNAME }}
+          COMPANYADMIN_PASSWORD: ${{ secrets.COMPANYADMIN_PASSWORD }}
+          PROVIDER_USERNAME:     ${{ secrets.PROVIDER_USERNAME }}
+          PROVIDER_PASSWORD:     ${{ secrets.PROVIDER_PASSWORD }}
+          MULTIROLE_USERNAME:    ${{ secrets.MULTIROLE_USERNAME }}
+          MULTIROLE_PASSWORD:    ${{ secrets.MULTIROLE_PASSWORD }}
+          EVALUATOR_USERNAME:    ${{ secrets.EVALUATOR_USERNAME }}
+          EVALUATOR_PASSWORD:    ${{ secrets.EVALUATOR_PASSWORD }}
+          AUDITOR_USERNAME:      ${{ secrets.AUDITOR_USERNAME }}
+          AUDITOR_PASSWORD:      ${{ secrets.AUDITOR_PASSWORD }}
+          ASSESSOR_USERNAME:     ${{ secrets.ASSESSOR_USERNAME }}
+          ASSESSOR_PASSWORD:     ${{ secrets.ASSESSOR_PASSWORD }}
+          CONTENTEDITOR_USERNAME: ${{ secrets.CONTENTEDITOR_USERNAME }}
+          CONTENTEDITOR_PASSWORD: ${{ secrets.CONTENTEDITOR_PASSWORD }}
+        run: |
+          touch /tmp/update-ts
+          TEST_ENV=${{ env.TEST_ENV }} npx playwright test esc.portal \
+            --project=desktop \
+            --grep "Portal \[${{ matrix.role }}\]" \
+            --reporter=line \
+            --update-snapshots=all || true
+
+      - name: Upload blob report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: blob-report-portal-${{ matrix.role }}
+          path: blob-report/
+          retention-days: 1
+          overwrite: true
+
+      - name: Upload updated snapshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: updated-snaps-portal-${{ matrix.role }}
+          path: snapshots/
+          retention-days: 1
+          overwrite: true
+
+  # ── 3. REPORT — merge, deploy, notify ───────────────────────────────────────
+  report:
+    needs: [setup, test-public, test-portal]
+    runs-on: ubuntu-latest
+    if: always()
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - run: npm ci
+
+      # Download all blob reports
+      - name: Download blob reports
+        uses: actions/download-artifact@v4
+        with:
+          pattern: blob-report-*
+          path: all-blobs/
+          merge-multiple: true
+
+      # Merge into one HTML report
+      - name: Generate HTML report
+        run: npx playwright merge-reports --reporter html ./all-blobs
+
+      # Download and merge all updated snapshots into a single baseline
+      - name: Download updated snapshots
+        uses: actions/download-artifact@v4
+        with:
+          pattern: updated-snaps-*
+          path: snapshots/
+          merge-multiple: true
+
+      # Write baseline metadata
+      - name: Write baseline metadata
+        run: |
+          mkdir -p snapshots
+          cat <<EOF > snapshots/baseline-meta.json
+          {
+            "env":        "${{ env.TEST_ENV }}",
+            "run_number": "${{ github.run_number }}",
+            "run_id":     "${{ github.run_id }}",
+            "branch":     "${{ github.ref_name }}",
+            "date":       "$(date -u '+%Y-%m-%d %H:%M UTC')"
+          }
+          EOF
+          echo "Baseline metadata written:"
+          cat snapshots/baseline-meta.json
+          SNAPSHOT_COUNT=$(find snapshots -name '*.png' | wc -l | tr -d ' ')
+          echo "Total snapshots: ${SNAPSHOT_COUNT}"
+
+      # Deploy HTML report to Cloudflare Pages
+      - name: Deploy to Cloudflare Pages
+        if: always()
+        id: cf-deploy
+        uses: cloudflare/pages-action@v1
+        continue-on-error: true
+        with:
+          apiToken:    ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId:   ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          projectName: ${{ secrets.CF_PAGES_PROJECT }}
+          directory:   playwright-report
+          branch:      ${{ env.TEST_ENV }}
+
+      # Notify Slack
+      - name: Notify Slack
+        if: always()
+        continue-on-error: true
+        env:
+          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          ENV="${{ env.TEST_ENV }}"
+          PREV_ENV="${{ needs.setup.outputs.prev_env }}"
+          PREV_RUN="${{ needs.setup.outputs.prev_run }}"
+          REPORT_URL="${{ steps.cf-deploy.outputs.alias || steps.cf-deploy.outputs.url }}"
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+          # Determine overall status from test job results
+          PUBLIC_RESULT="${{ needs.test-public.result }}"
+          PORTAL_RESULT="${{ needs.test-portal.result }}"
+          if [ "$PUBLIC_RESULT" = "success" ] && [ "$PORTAL_RESULT" = "success" ]; then
+            ICON="✅"; COLOR="#22c55e"; STATUS_LABEL="All tests passed"
+          else
+            ICON="❌"; COLOR="#ef4444"; STATUS_LABEL="Visual differences detected"
+          fi
+
+          if [ "$PREV_ENV" = "none" ] || [ -z "$PREV_ENV" ]; then
+            COMPARING="First run — no baseline yet"
+          else
+            COMPARING="${PREV_ENV^^} (Run #${PREV_RUN})  →  ${ENV^^} (Run #${{ github.run_number }})"
+          fi
+
+          SNAPSHOT_COUNT=$(find snapshots -name '*.png' | wc -l | tr -d ' ')
+
+          PAYLOAD=$(cat <<JSON
+          {
+            "text": "${ICON} Visual Regression — ${COMPARING} — ${STATUS_LABEL}",
+            "attachments": [
+              {
+                "color": "${COLOR}",
+                "blocks": [
+                  {
+                    "type": "header",
+                    "text": {
+                      "type": "plain_text",
+                      "text": "🎭 Visual Regression Report — Full Suite",
+                      "emoji": true
+                    }
+                  },
+                  {
+                    "type": "section",
+                    "fields": [
+                      { "type": "mrkdwn", "text": "*Comparing*\n\`${COMPARING}\`" },
+                      { "type": "mrkdwn", "text": "*Status*\n${ICON} ${STATUS_LABEL}" },
+                      { "type": "mrkdwn", "text": "*Environment*\n\`${ENV^^}\`" },
+                      { "type": "mrkdwn", "text": "*Snapshots*\n${SNAPSHOT_COUNT} pages × 1 viewport" }
+                    ]
+                  },
+                  {
+                    "type": "actions",
+                    "elements": [
+                      {
+                        "type": "button",
+                        "text": { "type": "plain_text", "text": "📊 View HTML Report", "emoji": true },
+                        "url": "${REPORT_URL}",
+                        "style": "primary"
+                      },
+                      {
+                        "type": "button",
+                        "text": { "type": "plain_text", "text": "⚙️ View Run #${{ github.run_number }}", "emoji": true },
+                        "url": "${RUN_URL}"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+          JSON
+          )
+
+          curl -s -X POST "$SLACK_WEBHOOK" \
+            -H 'Content-Type: application/json' \
+            -d "$PAYLOAD"
+
+      # Write GitHub job summary
+      - name: Job summary
+        if: always()
+        run: |
+          ENV="${{ env.TEST_ENV }}"
+          PREV_ENV="${{ needs.setup.outputs.prev_env }}"
+          PREV_RUN="${{ needs.setup.outputs.prev_run }}"
+          PREV_DATE="${{ needs.setup.outputs.prev_date }}"
+          REPORT_URL="${{ steps.cf-deploy.outputs.alias || steps.cf-deploy.outputs.url }}"
+          SNAPSHOT_COUNT=$(find snapshots -name '*.png' | wc -l | tr -d ' ')
+          case "$ENV" in
+            dev)  BASE_URL="https://drupal.dev.energysafetycanada.com" ;;
+            test) BASE_URL="https://drupal.test.energysafetycanada.com" ;;
+            uat)  BASE_URL="https://drupal.uat.energysafetycanada.com" ;;
+            beta) BASE_URL="https://beta.energysafetycanada.com" ;;
+            prod) BASE_URL="https://energysafetycanada.com" ;;
+            *)    BASE_URL="$ENV" ;;
+          esac
+
+          if [ "$PREV_ENV" = "none" ] || [ -z "$PREV_ENV" ]; then
+            COMPARING="First run — baseline created"
+          else
+            COMPARING="\`${PREV_ENV^^}\` Run #${PREV_RUN} (${PREV_DATE})  →  \`${ENV^^}\` Run #${{ github.run_number }}"
+          fi
+
+          PUBLIC_RESULT="${{ needs.test-public.result }}"
+          PORTAL_RESULT="${{ needs.test-portal.result }}"
+
+          {
+            echo "## Visual Regression Test Run — Full Suite"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| **Comparing** | ${COMPARING} |"
+            echo "| **Current environment** | \`${ENV^^}\` |"
+            echo "| **Base URL** | $BASE_URL |"
+            echo "| **Pages tested** | All public pages (3 shards) + All portal roles (9 jobs) |"
+            echo "| **Total snapshots** | ${SNAPSHOT_COUNT} |"
+            echo "| **Public tests** | $( [ "$PUBLIC_RESULT" = "success" ] && echo '✅ Passed' || echo '❌ Failed' ) |"
+            echo "| **Portal tests** | $( [ "$PORTAL_RESULT" = "success" ] && echo '✅ Passed' || echo '❌ Failed' ) |"
+            echo "| **Run** | [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) |"
+            if [ -n "$REPORT_URL" ]; then
+              echo "| **HTML Report** | [$REPORT_URL]($REPORT_URL) |"
+            fi
+          } >> $GITHUB_STEP_SUMMARY
+
+      # Save merged baseline for next run
+      - name: Save baseline
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: visual-baseline
+          path: snapshots/
+          retention-days: 90
+          overwrite: true
