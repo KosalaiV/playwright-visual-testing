@@ -480,9 +480,9 @@ jobs:
           FAILED=$(jq '.stats.unexpected // 0' merged-stats.json 2>/dev/null || echo "0")
           PASSED=$(jq '.stats.expected // 0' merged-stats.json 2>/dev/null || echo "0")
           if [ "$FAILED" -eq 0 ]; then
-            ICON="✅"; COLOR="#22c55e"; STATUS_LABEL="All tests passed (${PASSED} passed)"
+            ICON="✅"; COLOR="#22c55e"
           else
-            ICON="❌"; COLOR="#ef4444"; STATUS_LABEL="${FAILED} failure(s) detected"
+            ICON="❌"; COLOR="#ef4444"
           fi
 
           if [ "$PREV_ENV" = "none" ] || [ -z "$PREV_ENV" ]; then
@@ -493,9 +493,15 @@ jobs:
 
           SNAPSHOT_COUNT=$(find snapshots -name '*.png' | wc -l | tr -d ' ')
 
+          DURATION_MS=$(jq '.stats.duration // 0' merged-stats.json 2>/dev/null || echo "0")
+          DURATION_SEC=$(( DURATION_MS / 1000 ))
+          DURATION_MIN=$(( DURATION_SEC / 60 ))
+          DURATION_REM=$(( DURATION_SEC % 60 ))
+          DURATION="${DURATION_MIN}m ${DURATION_REM}s"
+
           PAYLOAD=$(cat <<JSON
           {
-            "text": "${ICON} Visual Regression — ${COMPARING} — ${STATUS_LABEL}",
+            "text": "${ICON} Visual Regression — ${COMPARING}",
             "attachments": [
               {
                 "color": "${COLOR}",
@@ -512,9 +518,10 @@ jobs:
                     "type": "section",
                     "fields": [
                       { "type": "mrkdwn", "text": "*Comparing*\n\`${COMPARING}\`" },
-                      { "type": "mrkdwn", "text": "*Status*\n${ICON} ${STATUS_LABEL}\n✅ ${PASSED} passed  ❌ ${FAILED} failed" },
+                      { "type": "mrkdwn", "text": "*Status*\n✅ ${PASSED} passed  ❌ ${FAILED} failed" },
                       { "type": "mrkdwn", "text": "*Environment*\n\`${ENV^^}\`" },
-                      { "type": "mrkdwn", "text": "*Snapshots*\n${SNAPSHOT_COUNT} pages × 1 viewport" }
+                      { "type": "mrkdwn", "text": "*Snapshots*\n${SNAPSHOT_COUNT} pages × 1 viewport" },
+                      { "type": "mrkdwn", "text": "*Duration*\n⏱ ${DURATION}" }
                     ]
                   },
                   {
