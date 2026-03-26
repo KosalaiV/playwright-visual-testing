@@ -42,7 +42,7 @@ export default defineConfig({
   // 🔥 NEW: isolate temp outputs from snapshots (prevents corruption)
   outputDir: 'test-results',
 
-  retries: 1,
+  retries: 0,
   fullyParallel: true,
   workers: process.env.CI ? 5 : undefined, // better local dev
 
