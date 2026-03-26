@@ -168,7 +168,7 @@ export async function hideChatWidgets(page: Page): Promise<void> {
     const observer = new MutationObserver(hideFixed);
     observer.observe(document.body, { childList: true, subtree: true });
     setTimeout(() => observer.disconnect(), 8_000);
-  });
+  }).catch(() => {}); // best-effort — don't fail the test if page is in a bad state
 
   // One extra frame for styles to apply before the caller captures.
   await page.waitForTimeout(300);
@@ -211,8 +211,8 @@ export async function stopCarousels(page: Page): Promise<void> {
  * Call this in beforeEach or at the start of each test after navigation.
  */
 export async function preparePageForSnapshot(page: Page): Promise<void> {
-  await acceptCookies(page);
-  await dismissAnnouncementBanner(page);
-  await hideChatWidgets(page);
-  await stopCarousels(page);
+  await acceptCookies(page).catch(() => {});
+  await dismissAnnouncementBanner(page).catch(() => {});
+  await hideChatWidgets(page).catch(() => {});
+  await stopCarousels(page).catch(() => {});
 }

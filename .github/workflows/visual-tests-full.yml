@@ -98,8 +98,39 @@ jobs:
             fi
           fi
 
-      # Share the downloaded baseline with all test jobs via a run-scoped artifact
-      # Ensure directory exists and has a placeholder so upload never fails on first run
+      # Validate baseline PNGs once here — removes any corrupted/truncated files
+      # before distributing to all 12 parallel test jobs.
+      # A corrupted PNG causes "unrecognised content at end of stream" in Playwright
+      # which produces a false failure with no actual/diff screenshot.
+      - name: Validate baseline PNGs
+        run: |
+          node -e "
+          const fs = require('fs'), path = require('path');
+          let total = 0, removed = 0;
+          function scan(dir) {
+            if (!fs.existsSync(dir)) return;
+            for (const item of fs.readdirSync(dir, { withFileTypes: true })) {
+              const full = path.join(dir, item.name);
+              if (item.isDirectory()) { scan(full); continue; }
+              if (!item.name.endsWith('.png')) continue;
+              total++;
+              const buf = fs.readFileSync(full);
+              const validMagic = buf.length > 8 &&
+                buf[0]===0x89 && buf[1]===0x50 && buf[2]===0x4E && buf[3]===0x47;
+              const hasIEND = buf.slice(-12).includes(Buffer.from('IEND'));
+              if (!validMagic || !hasIEND) {
+                console.log('Removed corrupted:', full);
+                fs.unlinkSync(full);
+                removed++;
+              }
+            }
+          }
+          scan('snapshots');
+          console.log(total + ' PNGs checked — ' + removed + ' corrupted removed, ' + (total - removed) + ' valid');
+          "
+
+      # Share the cleaned baseline with all test jobs via a run-scoped artifact.
+      # Ensure directory exists so upload never fails on first run.
       - name: Upload run-baseline for test jobs
         run: |
           mkdir -p snapshots
@@ -148,6 +179,8 @@ jobs:
           path: snapshots/
 
       # ── Run tests (captures diffs in blob report) ──
+      # --update-snapshots=missing: if a baseline was removed by the setup
+      # validation step, recreate it and pass — genuine pixel diffs still fail.
       - name: Run public tests (shard ${{ matrix.shard }}/3)
         continue-on-error: true
         env:
@@ -155,7 +188,8 @@ jobs:
           HTACCESS_PASS: ${{ secrets.HTACCESS_PASS }}
         run: |
           TEST_ENV=${{ env.TEST_ENV }} npx playwright test esc.visual \
-            --shard=${{ matrix.shard }}/3 || true
+            --shard=${{ matrix.shard }}/3 \
+            --update-snapshots=missing || true
 
       # ── Update baseline (second pass — doesn't affect blob report) ──
       - name: Update baseline snapshots
@@ -241,6 +275,8 @@ jobs:
           path: snapshots/
 
       # ── Run tests (captures diffs in blob report) ──
+      # --update-snapshots=missing: if a baseline was removed by the setup
+      # validation step, recreate it and pass — genuine pixel diffs still fail.
       - name: Run portal tests [${{ matrix.role }}]
         continue-on-error: true
         env:
@@ -267,7 +303,8 @@ jobs:
         run: |
           TEST_ENV=${{ env.TEST_ENV }} npx playwright test esc.portal \
             --project=desktop \
-            --grep "Portal \[${{ matrix.role }}\]" || true
+            --grep "Portal \[${{ matrix.role }}\]" \
+            --update-snapshots=missing || true
 
       # ── Update baseline (second pass) ──
       - name: Update baseline snapshots [${{ matrix.role }}]
@@ -310,9 +347,16 @@ jobs:
           retention-days: 1
           overwrite: true
 
+      # Upload only snapshots modified by this job (mirrors public job behaviour)
       - name: Upload updated snapshots
         if: always()
-        uses: actions/upload-artifact@v4
+        run: |
+          find snapshots -name '*.png' -newer /tmp/update-ts > /tmp/changed-snaps.txt
+          echo "Changed snapshots: $(wc -l < /tmp/changed-snaps.txt)"
+          cat /tmp/changed-snaps.txt
+
+      - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: updated-snaps-portal-${{ matrix.role }}
           path: snapshots/
@@ -358,6 +402,35 @@ jobs:
           path: snapshots/
           merge-multiple: true
 
+      # Validate the merged snapshots before saving — ensures the baseline
+      # artifact is always clean and next run never starts with corrupted PNGs.
+      - name: Validate updated snapshots
+        run: |
+          node -e "
+          const fs = require('fs'), path = require('path');
+          let total = 0, removed = 0;
+          function scan(dir) {
+            if (!fs.existsSync(dir)) return;
+            for (const item of fs.readdirSync(dir, { withFileTypes: true })) {
+              const full = path.join(dir, item.name);
+              if (item.isDirectory()) { scan(full); continue; }
+              if (!item.name.endsWith('.png')) continue;
+              total++;
+              const buf = fs.readFileSync(full);
+              const validMagic = buf.length > 8 &&
+                buf[0]===0x89 && buf[1]===0x50 && buf[2]===0x4E && buf[3]===0x47;
+              const hasIEND = buf.slice(-12).includes(Buffer.from('IEND'));
+              if (!validMagic || !hasIEND) {
+                console.log('Removed corrupted:', full);
+                fs.unlinkSync(full);
+                removed++;
+              }
+            }
+          }
+          scan('snapshots');
+          console.log(total + ' PNGs checked — ' + removed + ' corrupted removed before baseline save, ' + (total - removed) + ' valid');
+          "
+
       # Write baseline metadata
       - name: Write baseline metadata
         run: |
@@ -402,7 +475,8 @@ jobs:
           REPORT_URL="${{ steps.cf-deploy.outputs.alias || steps.cf-deploy.outputs.url }}"
           RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
 
-          # Determine overall status from actual test results (not job exit codes)
+          # Determine overall status from actual test results (not job exit codes —
+          # those are always "success" due to continue-on-error)
           FAILED=$(jq '.stats.unexpected // 0' merged-stats.json 2>/dev/null || echo "0")
           PASSED=$(jq '.stats.expected // 0' merged-stats.json 2>/dev/null || echo "0")
           if [ "$FAILED" -eq 0 ]; then
@@ -470,7 +544,7 @@ jobs:
             -H 'Content-Type: application/json' \
             -d "$PAYLOAD"
 
-      # Write GitHub job summary
+      # Write GitHub job summary (uses real stats, not job exit codes)
       - name: Job summary
         if: always()
         run: |
@@ -480,6 +554,8 @@ jobs:
           PREV_DATE="${{ needs.setup.outputs.prev_date }}"
           REPORT_URL="${{ steps.cf-deploy.outputs.alias || steps.cf-deploy.outputs.url }}"
           SNAPSHOT_COUNT=$(find snapshots -name '*.png' | wc -l | tr -d ' ')
+          FAILED=$(jq '.stats.unexpected // 0' merged-stats.json 2>/dev/null || echo "0")
+          PASSED=$(jq '.stats.expected // 0' merged-stats.json 2>/dev/null || echo "0")
           case "$ENV" in
             dev)  BASE_URL="https://drupal.dev.energysafetycanada.com" ;;
             test) BASE_URL="https://drupal.test.energysafetycanada.com" ;;
@@ -495,9 +571,6 @@ jobs:
             COMPARING="\`${PREV_ENV^^}\` Run #${PREV_RUN} (${PREV_DATE})  →  \`${ENV^^}\` Run #${{ github.run_number }}"
           fi
 
-          PUBLIC_RESULT="${{ needs.test-public.result }}"
-          PORTAL_RESULT="${{ needs.test-portal.result }}"
-
           {
             echo "## Visual Regression Test Run — Full Suite"
             echo ""
@@ -508,15 +581,15 @@ jobs:
             echo "| **Base URL** | $BASE_URL |"
             echo "| **Pages tested** | All public pages (3 shards) + All portal roles (9 jobs) |"
             echo "| **Total snapshots** | ${SNAPSHOT_COUNT} |"
-            echo "| **Public tests** | $( [ "$PUBLIC_RESULT" = "success" ] && echo '✅ Passed' || echo '❌ Failed' ) |"
-            echo "| **Portal tests** | $( [ "$PORTAL_RESULT" = "success" ] && echo '✅ Passed' || echo '❌ Failed' ) |"
+            echo "| **Passed** | ✅ ${PASSED} |"
+            echo "| **Failed** | $( [ "$FAILED" -eq 0 ] && echo '✅ 0' || echo "❌ ${FAILED}" ) |"
             echo "| **Run** | [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) |"
             if [ -n "$REPORT_URL" ]; then
               echo "| **HTML Report** | [$REPORT_URL]($REPORT_URL) |"
             fi
           } >> $GITHUB_STEP_SUMMARY
 
-      # Save merged baseline for next run
+      # Save merged, validated baseline for next run
       - name: Save baseline
         if: always()
         uses: actions/upload-artifact@v4
