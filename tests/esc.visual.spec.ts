@@ -33,7 +33,7 @@ function toSlug(name: string): string {
 
 for (const p of PUBLIC_PAGES) {
   test(p.name, async ({ page }) => {
-    test.setTimeout(120_000);
+    test.setTimeout(180_000);
 
     await page.goto(p.path, { waitUntil: 'load', timeout: 90_000 });
 

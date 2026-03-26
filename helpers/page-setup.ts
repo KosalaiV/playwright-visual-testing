@@ -224,16 +224,6 @@ export async function stopCarousels(page: Page): Promise<void> {
         (el as any).pause?.();
       } catch (_) {}
     });
-
-    // ── requestAnimationFrame — replace with a no-op to stop JS render loops ─
-    // This is the last resort for any custom JS animation not covered above.
-    // Safe to do here because we take the screenshot immediately after.
-    const _raf = window.requestAnimationFrame;
-    window.requestAnimationFrame = (cb) => window.setTimeout(cb, 100_000) as unknown as number;
-    window.cancelAnimationFrame = (id) => window.clearTimeout(id);
-    // Restore after 10s so other page functionality isn't permanently broken
-    // in case the test needs further interaction after the screenshot.
-    setTimeout(() => { window.requestAnimationFrame = _raf; }, 10_000);
   }).catch(() => {});
 
   // Wait for one paint cycle after all animations are frozen.

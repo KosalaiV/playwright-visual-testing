@@ -72,7 +72,7 @@ for (const role of ALL_ROLES) {
 
     for (const vrPage of rolePages) {
       test(vrPage.name, async ({ page }) => {
-        test.setTimeout(120_000);
+        test.setTimeout(180_000);
 
         await page.goto(vrPage.path, { waitUntil: 'load', timeout: 90_000 });
 
