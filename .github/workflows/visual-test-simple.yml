@@ -81,7 +81,11 @@ jobs:
             fi
           fi
 
-      # ── Run tests — NO --update-snapshots so diffs appear in report ────────
+      # ── Run tests ─────────────────────────────────────────────────────────
+      # --update-snapshots=missing: compares against existing baselines (diffs
+      # appear in report as failures) AND auto-creates baselines for any newly
+      # added pages. Existing baselines are never silently overwritten — use
+      # reset_baseline=true to intentionally accept a new visual state.
       - name: Run visual tests
         continue-on-error: true
         env:
@@ -89,31 +93,33 @@ jobs:
           HTACCESS_PASS: ${{ secrets.HTACCESS_PASS }}
           STUDENT_USERNAME: ${{ secrets.STUDENT_USERNAME }}
           STUDENT_PASSWORD: ${{ secrets.STUDENT_PASSWORD }}
+          INSTRUCTOR_USERNAME: ${{ secrets.INSTRUCTOR_USERNAME }}
+          INSTRUCTOR_PASSWORD: ${{ secrets.INSTRUCTOR_PASSWORD }}
+          COMPANYADMIN_USERNAME: ${{ secrets.COMPANYADMIN_USERNAME }}
+          COMPANYADMIN_PASSWORD: ${{ secrets.COMPANYADMIN_PASSWORD }}
+          PROVIDER_USERNAME: ${{ secrets.PROVIDER_USERNAME }}
+          PROVIDER_PASSWORD: ${{ secrets.PROVIDER_PASSWORD }}
+          MULTIROLE_USERNAME: ${{ secrets.MULTIROLE_USERNAME }}
+          MULTIROLE_PASSWORD: ${{ secrets.MULTIROLE_PASSWORD }}
+          EVALUATOR_USERNAME: ${{ secrets.EVALUATOR_USERNAME }}
+          EVALUATOR_PASSWORD: ${{ secrets.EVALUATOR_PASSWORD }}
+          AUDITOR_USERNAME: ${{ secrets.AUDITOR_USERNAME }}
+          AUDITOR_PASSWORD: ${{ secrets.AUDITOR_PASSWORD }}
+          ASSESSOR_USERNAME: ${{ secrets.ASSESSOR_USERNAME }}
+          ASSESSOR_PASSWORD: ${{ secrets.ASSESSOR_PASSWORD }}
+          CONTENTEDITOR_USERNAME: ${{ secrets.CONTENTEDITOR_USERNAME }}
+          CONTENTEDITOR_PASSWORD: ${{ secrets.CONTENTEDITOR_PASSWORD }}
         run: |
+          START_TIME=$(date +%s)
+          echo "START_TIME=$START_TIME" >> $GITHUB_ENV
           if TEST_ENV=${{ env.TEST_ENV }} npx playwright test esc.visual esc.portal \
             --project=desktop \
-            --grep "Home|Portal \[student\]"; then
+            --workers=20 \
+            --update-snapshots=missing; then
             echo "TEST_STATUS=passed" >> $GITHUB_ENV
           else
             echo "TEST_STATUS=failed" >> $GITHUB_ENV
           fi
-
-      # ── Refresh snapshots so current run becomes baseline for next run ────
-      # Uses --reporter=line to avoid overwriting the blob report we just captured.
-      # --update-snapshots=all silently writes current screenshots to snapshots/.
-      - name: Update baseline snapshots
-        if: always()
-        env:
-          HTACCESS_USER: ${{ secrets.HTACCESS_USER }}
-          HTACCESS_PASS: ${{ secrets.HTACCESS_PASS }}
-          STUDENT_USERNAME: ${{ secrets.STUDENT_USERNAME }}
-          STUDENT_PASSWORD: ${{ secrets.STUDENT_PASSWORD }}
-        run: |
-          TEST_ENV=${{ env.TEST_ENV }} npx playwright test esc.visual esc.portal \
-            --project=desktop \
-            --grep "Home|Portal \[student\]" \
-            --reporter=line \
-            --update-snapshots=all || true
 
       # ── Write baseline metadata for the next run ──────────────────────────
       - name: Write baseline metadata
@@ -164,6 +170,13 @@ jobs:
           REPORT_URL="${{ steps.cf-deploy.outputs.alias || steps.cf-deploy.outputs.url }}"
           RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
 
+          # Calculate duration
+          END_TIME=$(date +%s)
+          ELAPSED=$(( END_TIME - ${{ env.START_TIME }} ))
+          DURATION_MIN=$(( ELAPSED / 60 ))
+          DURATION_SEC=$(( ELAPSED % 60 ))
+          DURATION="${DURATION_MIN}m ${DURATION_SEC}s"
+
           if [ "$STATUS" = "passed" ]; then
             ICON="✅"
             COLOR="#22c55e"
@@ -202,7 +215,7 @@ jobs:
                       { "type": "mrkdwn", "text": "*Comparing*\n\`${COMPARING}\`" },
                       { "type": "mrkdwn", "text": "*Status*\n${ICON} ${STATUS_LABEL}" },
                       { "type": "mrkdwn", "text": "*Current env*\n\`${ENV^^}\`" },
-                      { "type": "mrkdwn", "text": "*Branch*\n\`${{ github.ref_name }}\`" }
+                      { "type": "mrkdwn", "text": "*Duration*\n${DURATION}" }
                     ]
                   },
                   {
@@ -264,7 +277,6 @@ jobs:
             echo "| **Comparing** | ${COMPARING} |"
             echo "| **Current environment** | \`${ENV^^}\` |"
             echo "| **Base URL** | $BASE_URL |"
-            echo "| **Pages tested** | Home (public), Portal \[student\] |"
             echo "| **Viewport** | Desktop — 1440 × 900 |"
             echo "| **Status** | ${{ env.TEST_STATUS == 'passed' && '✅ Passed' || '❌ Failed' }} |"
             echo "| **Run** | [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) |"

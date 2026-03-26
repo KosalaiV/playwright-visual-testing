@@ -1,5 +1,4 @@
 import { test, expect } from '@playwright/test';
-import { loginWithoutTOTP } from '../helpers/auth';
 import { vrPages, VrRole } from '../helpers/pages';
 import { preparePageForSnapshot } from '../helpers/page-setup';
 
@@ -7,8 +6,8 @@ import { preparePageForSnapshot } from '../helpers/page-setup';
  * ESC Portal Visual Regression Tests — Role-Based
  *
  * Validates the visual appearance of authenticated portal pages (/srv/*)
- * for each role. Each describe block logs in once per role, then visits
- * every page that role is permitted to see and captures a full-page snapshot.
+ * for each role. Auth state is pre-loaded from auth/{role}.json, written by
+ * helpers/global-setup.ts before the suite runs — no per-test login needed.
  *
  * Env vars required (set in .env):
  *   STUDENT_USERNAME / STUDENT_PASSWORD
@@ -55,19 +54,12 @@ for (const role of ALL_ROLES) {
   if (rolePages.length === 0) continue;
 
   test.describe(`Portal [${role}]`, () => {
-    // Log in before each test. Each Playwright test gets a fresh browser
-    // context so we must authenticate per test (no shared session state).
-    test.beforeEach(async ({ page }, testInfo) => {
+    // Load saved auth state written by global-setup.ts — no per-test login.
+    test.use({ storageState: `auth/${role}.json` });
+
+    test.beforeEach(async ({}, testInfo) => {
       const baseURL = (testInfo.project.use as { baseURL?: string }).baseURL ?? '';
       testInfo.annotations.push({ type: 'Environment', description: `${ENV} — ${baseURL}` });
-
-      // After login, Drupal may redirect to /srv/dashboard or a profile URL.
-      // We use a broad pattern so loginWithoutTOTP doesn't time out waiting
-      // for the default /check_logged_in=1 redirect.
-      await loginWithoutTOTP(page, {
-        role,
-        expectedUrlPattern: /srv\/|\/u\/|\/user|check_logged_in/,
-      });
     });
 
     for (const vrPage of rolePages) {
@@ -77,12 +69,12 @@ for (const role of ALL_ROLES) {
         await page.goto(vrPage.path, { waitUntil: 'load', timeout: 90_000 });
 
         // Let the portal page settle (dynamic widgets, lazy content).
-        await page.waitForTimeout(3_000);
+        await page.waitForTimeout(5_000);
 
         await preparePageForSnapshot(page);
 
         // Brief pause after dismissing popups before capturing.
-        await page.waitForTimeout(1_000);
+        await page.waitForTimeout(3_000);
 
         await expect(page).toHaveScreenshot(
           `${toSlug(vrPage.name)}-${role}.png`,

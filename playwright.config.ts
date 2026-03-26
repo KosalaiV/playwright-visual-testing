@@ -31,6 +31,7 @@ const httpCredentials = process.env.HTACCESS_USER
 
 export default defineConfig({
   testDir: './tests',
+  globalSetup: require.resolve('./helpers/global-setup'),
 
   // 🔥 IMPORTANT: baseline location (used by CI artifact system)
   snapshotDir: './snapshots',
