@@ -168,7 +168,7 @@ export async function hideChatWidgets(page: Page): Promise<void> {
     const observer = new MutationObserver(hideFixed);
     observer.observe(document.body, { childList: true, subtree: true });
     setTimeout(() => observer.disconnect(), 8_000);
-  }).catch(() => {}); // best-effort — don't fail the test if page is in a bad state
+  });
 
   // One extra frame for styles to apply before the caller captures.
   await page.waitForTimeout(300);
@@ -181,13 +181,13 @@ export async function hideChatWidgets(page: Page): Promise<void> {
  */
 export async function stopCarousels(page: Page): Promise<void> {
   await page.evaluate(() => {
-    // ── Videos ───────────────────────────────────────────────────────────────
+    // Pause every video and reset to first frame for a stable screenshot.
     document.querySelectorAll<HTMLVideoElement>('video').forEach((v) => {
       v.pause();
       v.currentTime = 0;
     });
 
-    // ── CSS animations / transitions ─────────────────────────────────────────
+    // Freeze CSS animations and transitions as a safety net.
     const style = document.createElement('style');
     style.textContent = `*, *::before, *::after {
       animation: none !important;
@@ -195,39 +195,10 @@ export async function stopCarousels(page: Page): Promise<void> {
       transition: none !important;
     }`;
     document.head.appendChild(style);
-
-    // ── JavaScript carousel libraries ────────────────────────────────────────
-    // Swiper (used on many ESC pages)
-    document.querySelectorAll<HTMLElement & { swiper?: any }>('.swiper, [class*="swiper"]').forEach((el) => {
-      try { el.swiper?.autoplay?.stop(); el.swiper?.disable(); } catch (_) {}
-    });
-
-    // Slick slider
-    document.querySelectorAll<HTMLElement & { slick?: any }>('.slick-slider').forEach((el) => {
-      try { (el as any).slick?.slickPause(); } catch (_) {}
-    });
-
-    // Glide.js
-    document.querySelectorAll<HTMLElement & { _g?: any }>('[data-glide-el]').forEach((el) => {
-      try { el._g?.pause(); } catch (_) {}
-    });
-
-    // Splide
-    document.querySelectorAll<HTMLElement & { splide?: any }>('.splide').forEach((el) => {
-      try { el.splide?.Components?.Autoplay?.pause(); } catch (_) {}
-    });
-
-    // Generic: pause any element that exposes autoplay/play controls
-    document.querySelectorAll<HTMLElement>('[data-autoplay], [data-cycling="true"]').forEach((el) => {
-      try {
-        (el as any).stop?.();
-        (el as any).pause?.();
-      } catch (_) {}
-    });
   }).catch(() => {});
 
-  // Wait for one paint cycle after all animations are frozen.
-  await page.waitForTimeout(500);
+  // Brief wait for the paused first frame to render.
+  await page.waitForTimeout(300);
 }
 
 /**
@@ -240,8 +211,8 @@ export async function stopCarousels(page: Page): Promise<void> {
  * Call this in beforeEach or at the start of each test after navigation.
  */
 export async function preparePageForSnapshot(page: Page): Promise<void> {
-  await acceptCookies(page).catch(() => {});
-  await dismissAnnouncementBanner(page).catch(() => {});
-  await hideChatWidgets(page).catch(() => {});
-  await stopCarousels(page).catch(() => {});
+  await acceptCookies(page);
+  await dismissAnnouncementBanner(page);
+  await hideChatWidgets(page);
+  await stopCarousels(page);
 }

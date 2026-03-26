@@ -33,20 +33,24 @@ function toSlug(name: string): string {
 
 for (const p of PUBLIC_PAGES) {
   test(p.name, async ({ page }) => {
-    test.setTimeout(180_000);
+    test.setTimeout(120_000);
 
     await page.goto(p.path, { waitUntil: 'load', timeout: 90_000 });
 
     // Let the page fully settle (hero carousel, lazy images, JS widgets).
-    await page.waitForTimeout(8_000);
+    await page.waitForTimeout(5_000);
 
     await preparePageForSnapshot(page);
 
     // Pause after dismissing popups and stopping carousels before capturing.
-    await page.waitForTimeout(8_000);
+    await page.waitForTimeout(3_000);
 
+    // Mask background videos — paused in stopCarousels() but masked as a
+    // safety net in case the first frame varies between runs.
     await expect(page).toHaveScreenshot(`${toSlug(p.name)}.png`, {
       fullPage: true,
+      mask: [page.locator('video')],
+      maskColor: '#cccccc',
     });
   });
 }
