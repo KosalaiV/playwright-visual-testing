@@ -343,9 +343,12 @@ jobs:
           path: all-blobs/
           merge-multiple: true
 
-      # Merge into one HTML report
+      # Merge into one HTML report + JSON stats
       - name: Generate HTML report
         run: npx playwright merge-reports --reporter html ./all-blobs
+
+      - name: Generate JSON stats
+        run: npx playwright merge-reports --reporter json ./all-blobs > merged-stats.json 2>/dev/null || true
 
       # Download and merge all updated snapshots into a single baseline
       - name: Download updated snapshots
@@ -399,13 +402,13 @@ jobs:
           REPORT_URL="${{ steps.cf-deploy.outputs.alias || steps.cf-deploy.outputs.url }}"
           RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
 
-          # Determine overall status from test job results
-          PUBLIC_RESULT="${{ needs.test-public.result }}"
-          PORTAL_RESULT="${{ needs.test-portal.result }}"
-          if [ "$PUBLIC_RESULT" = "success" ] && [ "$PORTAL_RESULT" = "success" ]; then
-            ICON="✅"; COLOR="#22c55e"; STATUS_LABEL="All tests passed"
+          # Determine overall status from actual test results (not job exit codes)
+          FAILED=$(jq '.stats.unexpected // 0' merged-stats.json 2>/dev/null || echo "0")
+          PASSED=$(jq '.stats.expected // 0' merged-stats.json 2>/dev/null || echo "0")
+          if [ "$FAILED" -eq 0 ]; then
+            ICON="✅"; COLOR="#22c55e"; STATUS_LABEL="All tests passed (${PASSED} passed)"
           else
-            ICON="❌"; COLOR="#ef4444"; STATUS_LABEL="Visual differences detected"
+            ICON="❌"; COLOR="#ef4444"; STATUS_LABEL="${FAILED} failure(s) detected"
           fi
 
           if [ "$PREV_ENV" = "none" ] || [ -z "$PREV_ENV" ]; then
@@ -435,7 +438,7 @@ jobs:
                     "type": "section",
                     "fields": [
                       { "type": "mrkdwn", "text": "*Comparing*\n\`${COMPARING}\`" },
-                      { "type": "mrkdwn", "text": "*Status*\n${ICON} ${STATUS_LABEL}" },
+                      { "type": "mrkdwn", "text": "*Status*\n${ICON} ${STATUS_LABEL}\n✅ ${PASSED} passed  ❌ ${FAILED} failed" },
                       { "type": "mrkdwn", "text": "*Environment*\n\`${ENV^^}\`" },
                       { "type": "mrkdwn", "text": "*Snapshots*\n${SNAPSHOT_COUNT} pages × 1 viewport" }
                     ]
