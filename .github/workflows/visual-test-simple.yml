@@ -138,11 +138,6 @@ jobs:
           echo "Baseline metadata written for next run:"
           cat snapshots/baseline-meta.json
 
-      # ── Merge blob reports into one consolidated HTML report ──────────────
-      - name: Generate HTML report
-        if: always()
-        run: npx playwright merge-reports --reporter html ./blob-report
-
       # ── Deploy HTML report to Cloudflare Pages ────────────────────────────
       - name: Deploy to Cloudflare Pages
         if: always()
