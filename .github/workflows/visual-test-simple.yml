@@ -287,5 +287,5 @@ jobs:
         with:
           name: visual-baseline
           path: snapshots/
-          retention-days: 90
+          retention-days: 3
           overwrite: true
