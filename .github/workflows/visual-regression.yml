@@ -1,0 +1,493 @@
+name: Visual Regression
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Two inputs only:
+#   environment  — the environment to run tests against
+#   baseline_env — (optional) the environment whose baseline to compare against
+#                  leave empty = same-env check
+#                  set to another env (e.g. uat) = cross-env comparison
+#
+# How baselines work:
+#   • Each environment has its own isolated baseline artifact (visual-baseline-<env>)
+#   • After every run the baseline is automatically updated to the current run's
+#     screenshots — so the next run always compares against the latest captured
+#     state, not the first-ever capture
+#   • First run for an environment: no baseline found → screenshots captured →
+#     saved as new baseline → no comparison errors thrown
+# ─────────────────────────────────────────────────────────────────────────────
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to test against'
+        required: true
+        default: 'uat'
+        type: choice
+        options: [dev, test, uat, beta, prod]
+
+      baseline_env:
+        description: 'Baseline to compare against (leave empty = same as environment)'
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+
+env:
+  TEST_ENV:     ${{ github.event.inputs.environment || 'uat' }}
+  BASELINE_ENV: ${{ github.event.inputs.baseline_env || github.event.inputs.environment || 'uat' }}
+
+jobs:
+
+  visual-tests:
+    runs-on: ubuntu-latest
+
+    steps:
+
+      # ── Checkout & install ────────────────────────────────────────────────────
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - run: npm ci
+
+      - run: npx playwright install chromium --with-deps
+
+      # ── Detect mode: same-env or cross-env ───────────────────────────────────
+      - name: Detect validation mode
+        run: |
+          TEST_ENV="${{ env.TEST_ENV }}"
+          BASELINE_ENV="${{ env.BASELINE_ENV }}"
+
+          if [ "$TEST_ENV" = "$BASELINE_ENV" ]; then
+            echo "VALIDATION_MODE=same-env" >> $GITHUB_ENV
+            echo "📌 Mode: Same-Environment — comparing ${TEST_ENV^^} against its own previous baseline"
+          else
+            echo "VALIDATION_MODE=cross-env" >> $GITHUB_ENV
+            echo "📌 Mode: Cross-Environment — comparing ${BASELINE_ENV^^} baseline against ${TEST_ENV^^}"
+          fi
+
+      # ── Clear any locally committed snapshots ────────────────────────────────
+      - name: Clear local snapshots
+        run: rm -rf snapshots/
+
+      # ── Download baseline for BASELINE_ENV ───────────────────────────────────
+      # continue-on-error: true — a missing artifact is not a failure.
+      # The next step handles that case with a clear log and first-run message.
+      - name: Download baseline
+        id: download-baseline
+        uses: dawidd6/action-download-artifact@v6
+        continue-on-error: true
+        with:
+          name:             visual-baseline-${{ env.BASELINE_ENV }}
+          path:             snapshots/
+          workflow:         visual-regression.yml
+          search_artifacts: true
+
+      # ── Log baseline context ──────────────────────────────────────────────────
+      - name: Read baseline metadata
+        run: |
+          TEST_ENV="${{ env.TEST_ENV }}"
+          BASELINE_ENV="${{ env.BASELINE_ENV }}"
+          VALIDATION_MODE="${{ env.VALIDATION_MODE }}"
+          META="snapshots/baseline-meta.json"
+
+          if [ -f "$META" ]; then
+            PREV_ENV=$(jq -r '.env         // "unknown"' "$META")
+            PREV_RUN=$(jq -r '.run_number  // "?"'       "$META")
+            PREV_DATE=$(jq -r '.date       // "unknown"' "$META")
+            SNAPSHOT_COUNT=$(find snapshots -name '*.png' | wc -l | tr -d ' ')
+            echo "PREV_ENV=$PREV_ENV"   >> $GITHUB_ENV
+            echo "PREV_RUN=$PREV_RUN"   >> $GITHUB_ENV
+            echo "PREV_DATE=$PREV_DATE" >> $GITHUB_ENV
+            echo "BASELINE_FOUND=true"  >> $GITHUB_ENV
+
+            if [ "$VALIDATION_MODE" = "cross-env" ]; then
+              echo "╔══════════════════════════════════════════════════════╗"
+              echo "║  CROSS-ENVIRONMENT COMPARISON                        ║"
+              echo "║  Baseline : ${BASELINE_ENV^^} — Run #${PREV_RUN} — ${PREV_DATE}"
+              echo "║  Testing  : ${TEST_ENV^^} — ${SNAPSHOT_COUNT} snapshots loaded"
+              echo "╚══════════════════════════════════════════════════════╝"
+            else
+              echo "╔══════════════════════════════════════════════════════╗"
+              echo "║  SAME-ENVIRONMENT REGRESSION CHECK                   ║"
+              echo "║  Baseline : ${BASELINE_ENV^^} — Run #${PREV_RUN} — ${PREV_DATE}"
+              echo "║  Testing  : ${TEST_ENV^^} — ${SNAPSHOT_COUNT} snapshots loaded"
+              echo "╚══════════════════════════════════════════════════════╝"
+            fi
+
+          else
+            echo "PREV_ENV=none" >> $GITHUB_ENV
+            echo "PREV_RUN="     >> $GITHUB_ENV
+            echo "PREV_DATE="    >> $GITHUB_ENV
+            echo "BASELINE_FOUND=false" >> $GITHUB_ENV
+
+            if [ "$VALIDATION_MODE" = "cross-env" ]; then
+              echo "╔══════════════════════════════════════════════════════╗"
+              echo "║  ⚠️  NO BASELINE FOUND FOR ${BASELINE_ENV^^}                ║"
+              echo "║                                                      ║"
+              echo "║  Steps to enable cross-env comparison:               ║"
+              echo "║    1. Run with environment=${BASELINE_ENV^^} (no baseline_env) ║"
+              echo "║    2. Then re-run with environment=${TEST_ENV^^},          ║"
+              echo "║       baseline_env=${BASELINE_ENV^^}                        ║"
+              echo "║                                                      ║"
+              echo "║  This run will create a fresh baseline for ${TEST_ENV^^}.  ║"
+              echo "╚══════════════════════════════════════════════════════╝"
+            else
+              echo "╔══════════════════════════════════════════════════════╗"
+              echo "║  FIRST RUN — No baseline found for ${TEST_ENV^^}          ║"
+              echo "║  Screenshots captured this run become the baseline.  ║"
+              echo "║  Next run will compare against these screenshots.    ║"
+              echo "╚══════════════════════════════════════════════════════╝"
+            fi
+          fi
+
+      # ── Run visual tests ──────────────────────────────────────────────────────
+      # Reporters: html (Cloudflare deploy), github (PR annotations), json (Slack parsing)
+      # --update-snapshots=missing: compares existing baselines, auto-creates for new pages
+      - name: Run visual tests
+        continue-on-error: true
+        env:
+          PLAYWRIGHT_JSON_OUTPUT_NAME: results.json
+          HTACCESS_USER:          ${{ secrets.HTACCESS_USER }}
+          HTACCESS_PASS:          ${{ secrets.HTACCESS_PASS }}
+          STUDENT_USERNAME:       ${{ secrets.STUDENT_USERNAME }}
+          STUDENT_PASSWORD:       ${{ secrets.STUDENT_PASSWORD }}
+          INSTRUCTOR_USERNAME:    ${{ secrets.INSTRUCTOR_USERNAME }}
+          INSTRUCTOR_PASSWORD:    ${{ secrets.INSTRUCTOR_PASSWORD }}
+          COMPANYADMIN_USERNAME:  ${{ secrets.COMPANYADMIN_USERNAME }}
+          COMPANYADMIN_PASSWORD:  ${{ secrets.COMPANYADMIN_PASSWORD }}
+          PROVIDER_USERNAME:      ${{ secrets.PROVIDER_USERNAME }}
+          PROVIDER_PASSWORD:      ${{ secrets.PROVIDER_PASSWORD }}
+          MULTIROLE_USERNAME:     ${{ secrets.MULTIROLE_USERNAME }}
+          MULTIROLE_PASSWORD:     ${{ secrets.MULTIROLE_PASSWORD }}
+          EVALUATOR_USERNAME:     ${{ secrets.EVALUATOR_USERNAME }}
+          EVALUATOR_PASSWORD:     ${{ secrets.EVALUATOR_PASSWORD }}
+          AUDITOR_USERNAME:       ${{ secrets.AUDITOR_USERNAME }}
+          AUDITOR_PASSWORD:       ${{ secrets.AUDITOR_PASSWORD }}
+          ASSESSOR_USERNAME:      ${{ secrets.ASSESSOR_USERNAME }}
+          ASSESSOR_PASSWORD:      ${{ secrets.ASSESSOR_PASSWORD }}
+          CONTENTEDITOR_USERNAME: ${{ secrets.CONTENTEDITOR_USERNAME }}
+          CONTENTEDITOR_PASSWORD: ${{ secrets.CONTENTEDITOR_PASSWORD }}
+        run: |
+          START_TIME=$(date +%s)
+          echo "START_TIME=$START_TIME" >> $GITHUB_ENV
+          if TEST_ENV=${{ env.TEST_ENV }} npx playwright test esc.visual esc.portal \
+            --project=desktop \
+            --workers=20 \
+            --update-snapshots=missing \
+            --reporter=html,github,json; then
+            echo "TEST_STATUS=passed" >> $GITHUB_ENV
+          else
+            echo "TEST_STATUS=failed" >> $GITHUB_ENV
+          fi
+
+      # ── Categorise failures ───────────────────────────────────────────────────
+      # Splits failures into two buckets:
+      #   Visual diffs   → toHaveScreenshot threshold exceeded → HTML report
+      #   Exec errors    → auth / timeout / network / 404     → Slack inline
+      - name: Parse test results
+        if: always()
+        run: |
+          RESULTS="results.json"
+
+          if [ ! -f "$RESULTS" ]; then
+            echo "⚠️ results.json not found — Playwright may have failed to start"
+            echo "PASSED_COUNT=0"      >> $GITHUB_ENV
+            echo "VISUAL_FAIL_COUNT=0" >> $GITHUB_ENV
+            echo "HAS_VISUAL_DIFFS=false" >> $GITHUB_ENV
+            echo "EXEC_ERROR_COUNT=0"  >> $GITHUB_ENV
+            exit 0
+          fi
+
+          PASSED=$(jq '.stats.expected // 0' "$RESULTS")
+          echo "PASSED_COUNT=$PASSED" >> $GITHUB_ENV
+
+          ALL_FAILURES=$(jq '[
+            .. | objects | select(has("tests")) |
+            .title as $spec |
+            .tests[] |
+            select(.results[0].status == "failed" or .results[0].status == "timedOut") |
+            { spec: $spec, status: .results[0].status, error: (.results[0].error.message // "Unknown error") }
+          ]' "$RESULTS")
+
+          # Visual diff failures — screenshot threshold exceeded
+          VISUAL_FAILS=$(echo "$ALL_FAILURES" | jq '[.[] | select(.error | test("screenshot|toHaveScreenshot|Screenshot"; "i"))]')
+          VISUAL_COUNT=$(echo "$VISUAL_FAILS" | jq 'length')
+          echo "VISUAL_FAIL_COUNT=$VISUAL_COUNT" >> $GITHUB_ENV
+          echo "HAS_VISUAL_DIFFS=$([ "$VISUAL_COUNT" -gt 0 ] && echo true || echo false)" >> $GITHUB_ENV
+
+          # Execution errors — auth, timeout, network, invalid URL
+          EXEC_FAILS=$(echo "$ALL_FAILURES" | jq '[.[] | select(.error | test("screenshot|toHaveScreenshot|Screenshot"; "i") | not)]')
+          EXEC_COUNT=$(echo "$EXEC_FAILS" | jq 'length')
+          echo "EXEC_ERROR_COUNT=$EXEC_COUNT" >> $GITHUB_ENV
+
+          # Format top 5 exec errors with categorised type label for Slack
+          if [ "$EXEC_COUNT" -gt 0 ]; then
+            EXEC_DETAIL=$(echo "$EXEC_FAILS" | jq -r '
+              .[:5][] |
+              (.error | split("\n")[0]) as $msg |
+              (if   ($msg | test("timeout|Timeout|exceeded.*ms"; "i"))            then "⏱ Timeout"
+               elif ($msg | test("401|403|Unauthorized|Forbidden|auth"; "i"))     then "🔐 Auth Error"
+               elif ($msg | test("404|Not Found|ERR_NAME_NOT_RESOLVED"; "i"))     then "🔍 Not Found"
+               elif ($msg | test("net::|ERR_|ECONNREFUSED|ENOTFOUND"; "i"))       then "🌐 Network Error"
+               else "⚠️ Error" end) as $type |
+              "[\($type)]  \(.spec)\n    \($msg | .[0:140])"
+            ')
+            {
+              echo "EXEC_ERRORS_DETAIL<<ENDOFVAR"
+              echo "$EXEC_DETAIL"
+              echo "ENDOFVAR"
+            } >> $GITHUB_ENV
+          fi
+
+          echo "────────────────────────────────────────────"
+          echo "  Passed       : $PASSED"
+          echo "  Visual diffs : $VISUAL_COUNT"
+          echo "  Exec errors  : $EXEC_COUNT"
+          echo "────────────────────────────────────────────"
+
+      # ── Roll the baseline forward ─────────────────────────────────────────────
+      # --update-snapshots=missing never overwrites an existing baseline, even when
+      # a test fails. Without this step the original baseline would be carried
+      # forward indefinitely. We copy the "actual" screenshots Playwright saved for
+      # every failing test over their corresponding baseline file so the next run
+      # always compares against the most recently captured state.
+      - name: Roll baseline forward
+        if: always()
+        run: |
+          UPDATED=0
+          while IFS= read -r actual; do
+            snapname=$(basename "$actual" | sed 's/-actual\.png$/.png/')
+            snapshot=$(find snapshots -name "$snapname" 2>/dev/null | head -1)
+            if [ -n "$snapshot" ]; then
+              cp "$actual" "$snapshot"
+              UPDATED=$((UPDATED + 1))
+              echo "  ✔ $snapshot"
+            fi
+          done < <(find test-results -name "*-actual.png" 2>/dev/null)
+
+          if [ "$UPDATED" -gt 0 ]; then
+            echo "────────────────────────────────────────────"
+            echo "  Baseline rolled forward: $UPDATED screenshot(s) updated"
+            echo "────────────────────────────────────────────"
+          else
+            echo "  No actual screenshots found — baseline unchanged"
+          fi
+
+      # ── Write baseline metadata ───────────────────────────────────────────────
+      - name: Write baseline metadata
+        if: always()
+        run: |
+          mkdir -p snapshots
+          cat <<EOF > snapshots/baseline-meta.json
+          {
+            "env":        "${{ env.TEST_ENV }}",
+            "run_number": "${{ github.run_number }}",
+            "run_id":     "${{ github.run_id }}",
+            "branch":     "${{ github.ref_name }}",
+            "date":       "$(date -u '+%Y-%m-%d %H:%M UTC')"
+          }
+          EOF
+
+      # ── Deploy HTML report to Cloudflare Pages ────────────────────────────────
+      # Only runs when there are actual visual diff failures — execution errors
+      # produce no diff images so the HTML report adds no value in that case.
+      - name: Deploy HTML report
+        if: always() && env.HAS_VISUAL_DIFFS == 'true'
+        id: cf-deploy
+        uses: cloudflare/pages-action@v1
+        continue-on-error: true
+        with:
+          apiToken:    ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId:   ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          projectName: ${{ secrets.CF_PAGES_PROJECT }}
+          directory:   playwright-report
+          branch:      ${{ env.TEST_ENV }}
+
+      # ── Notify Slack ──────────────────────────────────────────────────────────
+      # Visual diffs  → count shown + HTML report link (full diff is in the report)
+      # Exec errors   → listed inline with type label + GitHub run link
+      # First run     → blue, no comparison, confirms baseline was created
+      - name: Notify Slack
+        if: always()
+        continue-on-error: true
+        env:
+          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          ENV="${{ env.TEST_ENV }}"
+          BASELINE_ENV="${{ env.BASELINE_ENV }}"
+          PREV_RUN="${{ env.PREV_RUN }}"
+          BASELINE_FOUND="${{ env.BASELINE_FOUND }}"
+          VALIDATION_MODE="${{ env.VALIDATION_MODE }}"
+          PASSED_COUNT="${{ env.PASSED_COUNT }}"
+          VISUAL_FAIL_COUNT="${{ env.VISUAL_FAIL_COUNT }}"
+          EXEC_ERROR_COUNT="${{ env.EXEC_ERROR_COUNT }}"
+          EXEC_ERRORS_DETAIL="${{ env.EXEC_ERRORS_DETAIL }}"
+          HAS_VISUAL_DIFFS="${{ env.HAS_VISUAL_DIFFS }}"
+          REPORT_URL="${{ steps.cf-deploy.outputs.alias || steps.cf-deploy.outputs.url }}"
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+          END_TIME=$(date +%s)
+          ELAPSED=$(( END_TIME - ${{ env.START_TIME }} ))
+          DURATION="$(( ELAPSED / 60 ))m $(( ELAPSED % 60 ))s"
+
+          # Overall status & colour
+          if [ "$BASELINE_FOUND" = "false" ]; then
+            ICON="📸"; COLOR="#3b82f6"; STATUS_LABEL="Baseline created — no comparison yet"
+          elif [ "$VISUAL_FAIL_COUNT" -gt 0 ] && [ "$EXEC_ERROR_COUNT" -gt 0 ]; then
+            ICON="❌"; COLOR="#ef4444"; STATUS_LABEL="Visual diffs + execution errors detected"
+          elif [ "$VISUAL_FAIL_COUNT" -gt 0 ]; then
+            ICON="❌"; COLOR="#ef4444"; STATUS_LABEL="Visual differences detected"
+          elif [ "$EXEC_ERROR_COUNT" -gt 0 ]; then
+            ICON="⚠️"; COLOR="#f59e0b"; STATUS_LABEL="Execution errors detected (no visual diffs)"
+          else
+            ICON="✅"; COLOR="#22c55e"; STATUS_LABEL="All tests passed"
+          fi
+
+          # Comparison label
+          if [ "$BASELINE_FOUND" = "false" ]; then
+            if [ "$VALIDATION_MODE" = "cross-env" ]; then
+              COMPARING="No ${BASELINE_ENV^^} baseline — run ${BASELINE_ENV^^} first, then retry"
+            else
+              COMPARING="First run — baseline created for ${ENV^^}"
+            fi
+          elif [ "$VALIDATION_MODE" = "cross-env" ]; then
+            COMPARING="Cross-Env: ${BASELINE_ENV^^} (Run #${PREV_RUN}) → ${ENV^^} (Run #${{ github.run_number }})"
+          else
+            COMPARING="Same-Env: ${BASELINE_ENV^^} (Run #${PREV_RUN}) → ${ENV^^} (Run #${{ github.run_number }})"
+          fi
+
+          # Results breakdown
+          BREAKDOWN="✅ Passed: ${PASSED_COUNT}"
+          [ "$VISUAL_FAIL_COUNT" -gt 0 ] && BREAKDOWN="${BREAKDOWN}   |   ❌ Visual diffs: ${VISUAL_FAIL_COUNT} (see HTML report)"
+          [ "$EXEC_ERROR_COUNT"  -gt 0 ] && BREAKDOWN="${BREAKDOWN}   |   ⚠️ Exec errors: ${EXEC_ERROR_COUNT}"
+
+          # Exec errors block — GitHub run link only (no HTML report for exec errors)
+          if [ "$EXEC_ERROR_COUNT" -gt 0 ] && [ -n "$EXEC_ERRORS_DETAIL" ]; then
+            EXEC_BLOCK=$(jq -n \
+              --arg env "${ENV^^}" \
+              --arg detail "$EXEC_ERRORS_DETAIL" \
+              --arg run_url "$RUN_URL" \
+              --arg run_num "${{ github.run_number }}" \
+              '{type:"section",text:{type:"mrkdwn",text:("*⚠️ Execution Errors on "+$env+":*\n"+$detail+"\n\n→ View run logs: <"+$run_url+"|GitHub Run #"+$run_num+">")}}')
+          else
+            EXEC_BLOCK="null"
+          fi
+
+          # Cross-env next-steps hint when no baseline exists
+          if [ "$BASELINE_FOUND" = "false" ] && [ "$VALIDATION_MODE" = "cross-env" ]; then
+            HINT_BLOCK=$(jq -n \
+              --arg b "$BASELINE_ENV" --arg t "$ENV" \
+              '{type:"section",text:{type:"mrkdwn",text:("*📋 Next steps:*\n1. Run with `environment="+($b|ascii_upcase)+"` to create its baseline\n2. Re-run with `environment="+($t|ascii_upcase)+"`, `baseline_env="+$b+"`")}}')
+          else
+            HINT_BLOCK="null"
+          fi
+
+          PAYLOAD=$(jq -n \
+            --arg icon "$ICON" --arg comparing "$COMPARING" --arg status_label "$STATUS_LABEL" \
+            --arg color "$COLOR" --arg breakdown "$BREAKDOWN" \
+            --arg status_field "${ICON} ${STATUS_LABEL}" --arg env_field "${ENV^^}" \
+            --arg duration "$DURATION" --arg report_url "$REPORT_URL" \
+            --arg run_url "$RUN_URL" --arg run_num "${{ github.run_number }}" \
+            --argjson exec_block "$EXEC_BLOCK" --argjson hint_block "$HINT_BLOCK" \
+            --arg has_diffs "$HAS_VISUAL_DIFFS" \
+            '{
+              text: ($icon+" Visual Regression — "+$comparing+" — "+$status_label),
+              attachments: [{
+                color: $color,
+                blocks: (
+                  [
+                    { type:"header", text:{ type:"plain_text", text:"🎭 Visual Regression Report", emoji:true } },
+                    { type:"section", fields:[
+                        { type:"mrkdwn", text:("*Comparing*\n`"+$comparing+"`") },
+                        { type:"mrkdwn", text:("*Status*\n"+$status_field) },
+                        { type:"mrkdwn", text:("*Test Env*\n`"+$env_field+"`") },
+                        { type:"mrkdwn", text:("*Duration*\n"+$duration) }
+                    ]},
+                    { type:"section", text:{ type:"mrkdwn", text:$breakdown } }
+                  ]
+                  + (if $exec_block != null then [$exec_block] else [] end)
+                  + (if $hint_block != null then [$hint_block] else [] end)
+                  + [{
+                    type:"actions",
+                    elements:(
+                      (if ($has_diffs=="true" and $report_url!="") then
+                        [{ type:"button", text:{type:"plain_text",text:"📊 View HTML Report",emoji:true}, url:$report_url, style:"primary" }]
+                      else [] end)
+                      + [{ type:"button", text:{type:"plain_text",text:("⚙️ View Run #"+$run_num),emoji:true}, url:$run_url }]
+                    )
+                  }]
+                )
+              }]
+            }')
+
+          curl -s -X POST "$SLACK_WEBHOOK" \
+            -H 'Content-Type: application/json' \
+            -d "$PAYLOAD"
+
+      # ── GitHub Actions job summary ────────────────────────────────────────────
+      - name: Job summary
+        if: always()
+        run: |
+          ENV="${{ env.TEST_ENV }}"
+          BASELINE_ENV="${{ env.BASELINE_ENV }}"
+          PREV_RUN="${{ env.PREV_RUN }}"
+          PREV_DATE="${{ env.PREV_DATE }}"
+          BASELINE_FOUND="${{ env.BASELINE_FOUND }}"
+          VALIDATION_MODE="${{ env.VALIDATION_MODE }}"
+          REPORT_URL="${{ steps.cf-deploy.outputs.alias || steps.cf-deploy.outputs.url }}"
+
+          case "$ENV" in
+            dev)  BASE_URL="https://drupal.dev.energysafetycanada.com" ;;
+            test) BASE_URL="https://drupal.test.energysafetycanada.com" ;;
+            uat)  BASE_URL="https://drupal.uat.energysafetycanada.com"  ;;
+            beta) BASE_URL="https://beta.energysafetycanada.com"        ;;
+            prod) BASE_URL="https://energysafetycanada.com"             ;;
+            *)    BASE_URL="$ENV" ;;
+          esac
+
+          if [ "$BASELINE_FOUND" = "false" ]; then
+            [ "$VALIDATION_MODE" = "cross-env" ] \
+              && COMPARING="⚠️ No \`${BASELINE_ENV^^}\` baseline — run it first" \
+              || COMPARING="📸 First Run — baseline created for \`${ENV^^}\`"
+          elif [ "$VALIDATION_MODE" = "cross-env" ]; then
+            COMPARING="🔀 Cross-Env: \`${BASELINE_ENV^^}\` Run #${PREV_RUN} (${PREV_DATE}) → \`${ENV^^}\` Run #${{ github.run_number }}"
+          else
+            COMPARING="🔁 Same-Env: \`${BASELINE_ENV^^}\` Run #${PREV_RUN} (${PREV_DATE}) → \`${ENV^^}\` Run #${{ github.run_number }}"
+          fi
+
+          {
+            echo "## Visual Regression"
+            echo "| | |"
+            echo "|---|---|"
+            echo "| **Mode**              | ${{ env.VALIDATION_MODE }} |"
+            echo "| **Comparing**         | ${COMPARING} |"
+            echo "| **Test environment**  | \`${ENV^^}\` |"
+            echo "| **Baseline env**      | \`${BASELINE_ENV^^}\` |"
+            echo "| **Base URL**          | ${BASE_URL} |"
+            echo "| **Viewport**          | Desktop 1440×900 |"
+            echo "| **Passed**            | ${{ env.PASSED_COUNT }} |"
+            echo "| **Visual diffs**      | ${{ env.VISUAL_FAIL_COUNT }} |"
+            echo "| **Execution errors**  | ${{ env.EXEC_ERROR_COUNT }} |"
+            echo "| **Run**               | [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) |"
+            [ -n "$REPORT_URL" ] && echo "| **HTML Report** | [$REPORT_URL]($REPORT_URL) |"
+          } >> $GITHUB_STEP_SUMMARY
+
+      # ── Save updated baseline for TEST_ENV ───────────────────────────────────
+      # snapshots/ now contains the rolled-forward baseline (actual screenshots
+      # from this run have replaced any old baselines for failing tests).
+      - name: Save baseline
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name:           visual-baseline-${{ env.TEST_ENV }}
+          path:           snapshots/
+          retention-days: 3
+          overwrite:      true
