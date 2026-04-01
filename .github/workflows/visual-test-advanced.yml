@@ -1,0 +1,378 @@
+name: Visual Test (Advanced)
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to test against'
+        required: true
+        default: 'uat'
+        type: choice
+        options: [dev, test, uat, beta, prod]
+
+      baseline_env:
+        description: 'Baseline environment to compare against (leave empty = same as environment)'
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  actions:  read
+  contents: read
+
+env:
+  TEST_ENV:     ${{ github.event.inputs.environment || 'uat' }}
+  BASELINE_ENV: ${{ github.event.inputs.baseline_env || github.event.inputs.environment || 'uat' }}
+
+jobs:
+
+  visual-tests:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - run: npm ci
+
+      - run: npx playwright install chromium --with-deps
+
+      # ── Detect validation mode ────────────────────────────────────────────────
+      - name: Detect validation mode
+        run: |
+          TEST_ENV="${{ env.TEST_ENV }}"
+          BASELINE_ENV="${{ env.BASELINE_ENV }}"
+
+          if [ "$TEST_ENV" = "$BASELINE_ENV" ]; then
+            echo "VALIDATION_MODE=same-env" >> $GITHUB_ENV
+            echo "📌 Mode: Same-Environment — will compare ${TEST_ENV^^} against its own previous baseline"
+          else
+            echo "VALIDATION_MODE=cross-env" >> $GITHUB_ENV
+            echo "📌 Mode: Cross-Environment — will compare ${BASELINE_ENV^^} baseline against ${TEST_ENV^^}"
+          fi
+
+      # ── Clear git-committed local snapshots ──────────────────────────────────
+      - name: Clear local snapshots
+        run: rm -rf snapshots/
+
+      # ── Download baseline ─────────────────────────────────────────────────────
+      # Downloads the baseline for BASELINE_ENV (same or different from TEST_ENV).
+      # continue-on-error: true means a missing artifact will never fail the run —
+      # the next step handles that case with a clear log message.
+      - name: Download baseline
+        id: download-baseline
+        uses: dawidd6/action-download-artifact@v6
+        continue-on-error: true
+        with:
+          name: visual-baseline-${{ env.BASELINE_ENV }}
+          path: snapshots/
+          workflow: visual-test-advanced.yml
+          search_artifacts: true
+
+      # ── Read baseline metadata / handle missing baseline ─────────────────────
+      - name: Read baseline metadata
+        run: |
+          TEST_ENV="${{ env.TEST_ENV }}"
+          BASELINE_ENV="${{ env.BASELINE_ENV }}"
+          VALIDATION_MODE="${{ env.VALIDATION_MODE }}"
+          META="snapshots/baseline-meta.json"
+
+          if [ -f "$META" ]; then
+            PREV_ENV=$(jq -r '.env   // "unknown"' "$META")
+            PREV_RUN=$(jq -r '.run_number // "?"'  "$META")
+            PREV_DATE=$(jq -r '.date // "unknown"' "$META")
+            SNAPSHOT_COUNT=$(find snapshots -name '*.png' | wc -l | tr -d ' ')
+            echo "PREV_ENV=$PREV_ENV"   >> $GITHUB_ENV
+            echo "PREV_RUN=$PREV_RUN"   >> $GITHUB_ENV
+            echo "PREV_DATE=$PREV_DATE" >> $GITHUB_ENV
+            echo "BASELINE_FOUND=true"  >> $GITHUB_ENV
+
+            if [ "$VALIDATION_MODE" = "cross-env" ]; then
+              echo "BASELINE_MODE=Cross-Env — ${BASELINE_ENV^^} (Run #${PREV_RUN}) baseline vs ${TEST_ENV^^} (${SNAPSHOT_COUNT} snapshots)" >> $GITHUB_ENV
+              echo ""
+              echo "╔══════════════════════════════════════════════════════════╗"
+              echo "║  CROSS-ENVIRONMENT COMPARISON                            ║"
+              echo "║  Baseline : ${BASELINE_ENV^^} — Run #${PREV_RUN} — ${PREV_DATE}"
+              echo "║  Testing  : ${TEST_ENV^^}"
+              echo "║  Snapshots: ${SNAPSHOT_COUNT}"
+              echo "╚══════════════════════════════════════════════════════════╝"
+            else
+              echo "BASELINE_MODE=Same-Env — ${BASELINE_ENV^^} (Run #${PREV_RUN}) → ${TEST_ENV^^} (${SNAPSHOT_COUNT} snapshots)" >> $GITHUB_ENV
+              echo ""
+              echo "╔══════════════════════════════════════════════════════════╗"
+              echo "║  SAME-ENVIRONMENT REGRESSION CHECK                       ║"
+              echo "║  Baseline : ${BASELINE_ENV^^} — Run #${PREV_RUN} — ${PREV_DATE}"
+              echo "║  Testing  : ${TEST_ENV^^}"
+              echo "║  Snapshots: ${SNAPSHOT_COUNT}"
+              echo "╚══════════════════════════════════════════════════════════╝"
+            fi
+
+          else
+            echo "PREV_ENV=none"  >> $GITHUB_ENV
+            echo "PREV_RUN="      >> $GITHUB_ENV
+            echo "PREV_DATE="     >> $GITHUB_ENV
+            echo "BASELINE_FOUND=false" >> $GITHUB_ENV
+
+            if [ "$VALIDATION_MODE" = "cross-env" ]; then
+              echo "BASELINE_MODE=No ${BASELINE_ENV^^} baseline found — run ${BASELINE_ENV^^} first to enable cross-env comparison" >> $GITHUB_ENV
+              echo ""
+              echo "╔══════════════════════════════════════════════════════════╗"
+              echo "║  ⚠️  NO BASELINE FOUND FOR ${BASELINE_ENV^^}                    ║"
+              echo "║                                                          ║"
+              echo "║  To use cross-environment comparison:                    ║"
+              echo "║    1. Run this workflow with environment=${BASELINE_ENV^^}        ║"
+              echo "║       (leave baseline_env empty) to create its baseline. ║"
+              echo "║    2. Then re-run with environment=${TEST_ENV^^},              ║"
+              echo "║       baseline_env=${BASELINE_ENV^^} to compare.               ║"
+              echo "║                                                          ║"
+              echo "║  This run will proceed and create a baseline for ${TEST_ENV^^}. ║"
+              echo "╚══════════════════════════════════════════════════════════╝"
+            else
+              echo "BASELINE_MODE=First Run — no ${TEST_ENV^^} baseline yet; this run creates it" >> $GITHUB_ENV
+              echo ""
+              echo "╔══════════════════════════════════════════════════════════╗"
+              echo "║  FIRST RUN — No baseline found for ${TEST_ENV^^}               ║"
+              echo "║                                                          ║"
+              echo "║  This run will create the baseline for ${TEST_ENV^^}.          ║"
+              echo "║  Next run options:                                       ║"
+              echo "║    • Same-env check  → environment=${TEST_ENV^^}               ║"
+              echo "║    • Cross-env check → environment=<other>,            ║"
+              echo "║                        baseline_env=${TEST_ENV^^}              ║"
+              echo "╚══════════════════════════════════════════════════════════╝"
+            fi
+          fi
+
+      # ── Run tests ─────────────────────────────────────────────────────────────
+      - name: Run visual tests
+        continue-on-error: true
+        env:
+          HTACCESS_USER: ${{ secrets.HTACCESS_USER }}
+          HTACCESS_PASS: ${{ secrets.HTACCESS_PASS }}
+          STUDENT_USERNAME: ${{ secrets.STUDENT_USERNAME }}
+          STUDENT_PASSWORD: ${{ secrets.STUDENT_PASSWORD }}
+          INSTRUCTOR_USERNAME: ${{ secrets.INSTRUCTOR_USERNAME }}
+          INSTRUCTOR_PASSWORD: ${{ secrets.INSTRUCTOR_PASSWORD }}
+          COMPANYADMIN_USERNAME: ${{ secrets.COMPANYADMIN_USERNAME }}
+          COMPANYADMIN_PASSWORD: ${{ secrets.COMPANYADMIN_PASSWORD }}
+          PROVIDER_USERNAME: ${{ secrets.PROVIDER_USERNAME }}
+          PROVIDER_PASSWORD: ${{ secrets.PROVIDER_PASSWORD }}
+          MULTIROLE_USERNAME: ${{ secrets.MULTIROLE_USERNAME }}
+          MULTIROLE_PASSWORD: ${{ secrets.MULTIROLE_PASSWORD }}
+          EVALUATOR_USERNAME: ${{ secrets.EVALUATOR_USERNAME }}
+          EVALUATOR_PASSWORD: ${{ secrets.EVALUATOR_PASSWORD }}
+          AUDITOR_USERNAME: ${{ secrets.AUDITOR_USERNAME }}
+          AUDITOR_PASSWORD: ${{ secrets.AUDITOR_PASSWORD }}
+          ASSESSOR_USERNAME: ${{ secrets.ASSESSOR_USERNAME }}
+          ASSESSOR_PASSWORD: ${{ secrets.ASSESSOR_PASSWORD }}
+          CONTENTEDITOR_USERNAME: ${{ secrets.CONTENTEDITOR_USERNAME }}
+          CONTENTEDITOR_PASSWORD: ${{ secrets.CONTENTEDITOR_PASSWORD }}
+        run: |
+          START_TIME=$(date +%s)
+          echo "START_TIME=$START_TIME" >> $GITHUB_ENV
+          if TEST_ENV=${{ env.TEST_ENV }} npx playwright test esc.visual esc.portal \
+            --project=desktop \
+            --workers=20 \
+            --update-snapshots=missing; then
+            echo "TEST_STATUS=passed" >> $GITHUB_ENV
+          else
+            echo "TEST_STATUS=failed" >> $GITHUB_ENV
+          fi
+
+      # ── Write baseline metadata for the next run ──────────────────────────────
+      - name: Write baseline metadata
+        if: always()
+        run: |
+          mkdir -p snapshots
+          cat <<EOF > snapshots/baseline-meta.json
+          {
+            "env":        "${{ env.TEST_ENV }}",
+            "run_number": "${{ github.run_number }}",
+            "run_id":     "${{ github.run_id }}",
+            "branch":     "${{ github.ref_name }}",
+            "date":       "$(date -u '+%Y-%m-%d %H:%M UTC')"
+          }
+          EOF
+          echo "Baseline metadata written for next run:"
+          cat snapshots/baseline-meta.json
+
+      # ── Deploy HTML report to Cloudflare Pages ────────────────────────────────
+      - name: Deploy to Cloudflare Pages
+        if: always()
+        id: cf-deploy
+        uses: cloudflare/pages-action@v1
+        continue-on-error: true
+        with:
+          apiToken:    ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId:   ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          projectName: ${{ secrets.CF_PAGES_PROJECT }}
+          directory:   playwright-report
+          branch:      ${{ env.TEST_ENV }}
+
+      # ── Post to Slack ─────────────────────────────────────────────────────────
+      - name: Notify Slack
+        if: always()
+        continue-on-error: true
+        env:
+          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          ENV="${{ env.TEST_ENV }}"
+          BASELINE_ENV="${{ env.BASELINE_ENV }}"
+          STATUS="${{ env.TEST_STATUS }}"
+          PREV_RUN="${{ env.PREV_RUN }}"
+          BASELINE_FOUND="${{ env.BASELINE_FOUND }}"
+          VALIDATION_MODE="${{ env.VALIDATION_MODE }}"
+          REPORT_URL="${{ steps.cf-deploy.outputs.alias || steps.cf-deploy.outputs.url }}"
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+          # Duration
+          END_TIME=$(date +%s)
+          ELAPSED=$(( END_TIME - ${{ env.START_TIME }} ))
+          DURATION_MIN=$(( ELAPSED / 60 ))
+          DURATION_SEC=$(( ELAPSED % 60 ))
+          DURATION="${DURATION_MIN}m ${DURATION_SEC}s"
+
+          # Status label
+          if [ "$BASELINE_FOUND" = "false" ]; then
+            ICON="📸"
+            COLOR="#3b82f6"
+            STATUS_LABEL="Baseline created — no comparison yet"
+          elif [ "$STATUS" = "passed" ]; then
+            ICON="✅"
+            COLOR="#22c55e"
+            STATUS_LABEL="All tests passed"
+          else
+            ICON="❌"
+            COLOR="#ef4444"
+            STATUS_LABEL="Visual differences detected"
+          fi
+
+          # Comparison label
+          if [ "$BASELINE_FOUND" = "false" ]; then
+            if [ "$VALIDATION_MODE" = "cross-env" ]; then
+              COMPARING="No ${BASELINE_ENV^^} baseline — run ${BASELINE_ENV^^} first, then retry cross-env"
+            else
+              COMPARING="First run — baseline created for ${ENV^^}"
+            fi
+          elif [ "$VALIDATION_MODE" = "cross-env" ]; then
+            COMPARING="Cross-Env: ${BASELINE_ENV^^} (Run #${PREV_RUN})  →  ${ENV^^} (Run #${{ github.run_number }})"
+          else
+            COMPARING="Same-Env: ${BASELINE_ENV^^} (Run #${PREV_RUN})  →  ${ENV^^} (Run #${{ github.run_number }})"
+          fi
+
+          PAYLOAD=$(cat <<JSON
+          {
+            "text": "${ICON} Visual Regression — ${COMPARING} — ${STATUS_LABEL}",
+            "attachments": [
+              {
+                "color": "${COLOR}",
+                "blocks": [
+                  {
+                    "type": "header",
+                    "text": {
+                      "type": "plain_text",
+                      "text": "🎭 Visual Regression Report",
+                      "emoji": true
+                    }
+                  },
+                  {
+                    "type": "section",
+                    "fields": [
+                      { "type": "mrkdwn", "text": "*Comparing*\n\`${COMPARING}\`" },
+                      { "type": "mrkdwn", "text": "*Status*\n${ICON} ${STATUS_LABEL}" },
+                      { "type": "mrkdwn", "text": "*Test Env*\n\`${ENV^^}\`" },
+                      { "type": "mrkdwn", "text": "*Duration*\n${DURATION}" }
+                    ]
+                  },
+                  {
+                    "type": "actions",
+                    "elements": [
+                      {
+                        "type": "button",
+                        "text": { "type": "plain_text", "text": "📊 View HTML Report", "emoji": true },
+                        "url": "${REPORT_URL}",
+                        "style": "primary"
+                      },
+                      {
+                        "type": "button",
+                        "text": { "type": "plain_text", "text": "⚙️ View Run #${{ github.run_number }}", "emoji": true },
+                        "url": "${RUN_URL}"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+          JSON
+          )
+
+          curl -s -X POST "$SLACK_WEBHOOK" \
+            -H 'Content-Type: application/json' \
+            -d "$PAYLOAD"
+
+      # ── Write job summary ─────────────────────────────────────────────────────
+      - name: Job summary
+        if: always()
+        run: |
+          ENV="${{ env.TEST_ENV }}"
+          BASELINE_ENV="${{ env.BASELINE_ENV }}"
+          PREV_RUN="${{ env.PREV_RUN }}"
+          PREV_DATE="${{ env.PREV_DATE }}"
+          BASELINE_FOUND="${{ env.BASELINE_FOUND }}"
+          VALIDATION_MODE="${{ env.VALIDATION_MODE }}"
+          REPORT_URL="${{ steps.cf-deploy.outputs.alias || steps.cf-deploy.outputs.url }}"
+
+          case "$ENV" in
+            dev)  BASE_URL="https://drupal.dev.energysafetycanada.com" ;;
+            test) BASE_URL="https://drupal.test.energysafetycanada.com" ;;
+            uat)  BASE_URL="https://drupal.uat.energysafetycanada.com" ;;
+            beta) BASE_URL="https://beta.energysafetycanada.com" ;;
+            prod) BASE_URL="https://energysafetycanada.com" ;;
+            *)    BASE_URL="$ENV" ;;
+          esac
+
+          if [ "$BASELINE_FOUND" = "false" ]; then
+            if [ "$VALIDATION_MODE" = "cross-env" ]; then
+              COMPARING="⚠️ No \`${BASELINE_ENV^^}\` baseline found — run \`${BASELINE_ENV^^}\` first, then retry with \`baseline_env=${BASELINE_ENV}\`"
+            else
+              COMPARING="📸 First Run — baseline created for \`${ENV^^}\`. Next run will compare against this."
+            fi
+          elif [ "$VALIDATION_MODE" = "cross-env" ]; then
+            COMPARING="🔀 Cross-Env: \`${BASELINE_ENV^^}\` Run #${PREV_RUN} (${PREV_DATE})  →  \`${ENV^^}\` Run #${{ github.run_number }}"
+          else
+            COMPARING="🔁 Same-Env: \`${BASELINE_ENV^^}\` Run #${PREV_RUN} (${PREV_DATE})  →  \`${ENV^^}\` Run #${{ github.run_number }}"
+          fi
+
+          {
+            echo "## Visual Regression Test Run"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| **Mode** | ${{ env.VALIDATION_MODE }} |"
+            echo "| **Comparing** | ${COMPARING} |"
+            echo "| **Test environment** | \`${ENV^^}\` |"
+            echo "| **Baseline environment** | \`${BASELINE_ENV^^}\` |"
+            echo "| **Base URL** | $BASE_URL |"
+            echo "| **Viewport** | Desktop — 1440 × 900 |"
+            echo "| **Status** | ${{ env.TEST_STATUS == 'passed' && '✅ Passed' || '❌ Failed' }} |"
+            echo "| **Run** | [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) |"
+            if [ -n "$REPORT_URL" ]; then
+              echo "| **HTML Report** | [$REPORT_URL]($REPORT_URL) |"
+            fi
+          } >> $GITHUB_STEP_SUMMARY
+
+      # ── Save current run's snapshots as baseline for TEST_ENV ────────────────
+      # NOTE: always saved under TEST_ENV — never overwrites the BASELINE_ENV artifact.
+      # This ensures cross-env comparisons don't corrupt the source baseline.
+      - name: Save baseline
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: visual-baseline-${{ env.TEST_ENV }}
+          path: snapshots/
+          retention-days: 3
+          overwrite: true
