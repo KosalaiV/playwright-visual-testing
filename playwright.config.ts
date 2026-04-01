@@ -91,26 +91,55 @@ export default defineConfig({
   },
 
   projects: [
+    // ── Chrome (Chromium engine) ─────────────────────────────────────────────
+    // Desktop: standard desktop Chrome UA, 1440×900
     {
-      name: 'desktop',
-      use: {
-        ...devices['Desktop Chrome'],
-        viewport: { width: 1440, height: 900 },
-      },
+      name: 'desktop-chromium',
+      use: { ...devices['Desktop Chrome'],   viewport: { width: 1440, height: 900 } },
     },
+    // Tablet: iPad Pro 11 — touch enabled, iPad UA, 834×1194 @ 2x DPR
     {
-      name: 'tablet',
-      use: {
-        ...devices['Desktop Chrome'],
-        viewport: { width: 768, height: 1024 },
-      },
+      name: 'tablet-chromium',
+      use: { ...devices['iPad Pro 11'] },
     },
+    // Mobile: Pixel 7 — Android Chrome UA, 412×915 @ 2.625x DPR, touch
     {
-      name: 'mobile',
-      use: {
-        ...devices['Pixel 5'],
-        viewport: { width: 390, height: 844 },
-      },
+      name: 'mobile-chromium',
+      use: { ...devices['Pixel 7'] },
+    },
+
+    // ── Firefox (Gecko engine) ───────────────────────────────────────────────
+    // Desktop: standard desktop Firefox UA, 1440×900
+    {
+      name: 'desktop-firefox',
+      use: { ...devices['Desktop Firefox'],  viewport: { width: 1440, height: 900 } },
+    },
+    // Tablet: iPad Pro 11 characteristics (touch, DPR, viewport) on Gecko engine
+    {
+      name: 'tablet-firefox',
+      use: { ...devices['iPad Pro 11'] },
+    },
+    // Mobile: Pixel 7 characteristics (touch, DPR, viewport) on Gecko engine
+    {
+      name: 'mobile-firefox',
+      use: { ...devices['Pixel 7'] },
+    },
+
+    // ── Safari (WebKit engine) ───────────────────────────────────────────────
+    // Desktop: standard desktop Safari UA, 1440×900
+    {
+      name: 'desktop-webkit',
+      use: { ...devices['Desktop Safari'],   viewport: { width: 1440, height: 900 } },
+    },
+    // Tablet: iPad Pro 11 — real iPad Safari UA, touch, 2x DPR, on WebKit engine
+    {
+      name: 'tablet-webkit',
+      use: { ...devices['iPad Pro 11'] },
+    },
+    // Mobile: iPhone 14 — real iPhone Safari UA, touch, 3x DPR, 390×844
+    {
+      name: 'mobile-webkit',
+      use: { ...devices['iPhone 14'] },
     },
   ],
 });

@@ -1,19 +1,18 @@
-name: Visual Regression
+name: Visual Cross-Browser
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Two inputs only:
-#   environment  — the environment to run tests against
-#   baseline_env — (optional) the environment whose baseline to compare against
-#                  leave empty = same-env check
-#                  set to another env (e.g. uat) = cross-env comparison
+# Runs all 9 browser × viewport combinations automatically — no checkboxes.
 #
-# How baselines work:
-#   • Each environment has its own isolated baseline artifact (visual-baseline-<env>)
-#   • After every run the baseline is automatically updated to the current run's
-#     screenshots — so the next run always compares against the latest captured
-#     state, not the first-ever capture
-#   • First run for an environment: no baseline found → screenshots captured →
-#     saved as new baseline → no comparison errors thrown
+#   Browsers  : Chrome (Chromium)  ·  Firefox  ·  Safari (WebKit)
+#   Viewports : Desktop 1440×900  ·  Tablet iPad Pro 11  ·  Mobile Pixel 7 / iPhone 14
+#
+# Identical to Percy / BrowserStack philosophy: one trigger, full matrix, one report.
+#
+# Baseline isolation:
+#   • Artifact name: visual-cb-baseline-<env>  (separate from visual-regression.yml)
+#   • Rolling baseline: after each run the actual screenshots replace the stored
+#     baseline so the next run always compares against the latest captured state
+#   • First run: no baseline → all 9 sets captured → saved → next run compares
 # ─────────────────────────────────────────────────────────────────────────────
 
 on:
@@ -27,48 +26,10 @@ on:
         options: [dev, test, uat, beta, prod]
 
       baseline_env:
-        description: 'Baseline to compare against (leave empty = same as environment)'
+        description: 'Baseline env to compare against (leave empty = same as environment)'
         required: false
         default: ''
         type: string
-
-      # ── Viewports ────────────────────────────────────────────────────────
-      viewport_desktop:
-        description: 'Desktop (1440×900)'
-        required: false
-        default: true
-        type: boolean
-
-      viewport_tablet:
-        description: 'Tablet (768×1024)'
-        required: false
-        default: false
-        type: boolean
-
-      viewport_mobile:
-        description: 'Mobile (390×844)'
-        required: false
-        default: false
-        type: boolean
-
-      # ── Browsers ─────────────────────────────────────────────────────────
-      browser_chromium:
-        description: 'Chromium (Chrome / Edge)'
-        required: false
-        default: true
-        type: boolean
-
-      browser_firefox:
-        description: 'Firefox'
-        required: false
-        default: false
-        type: boolean
-
-      browser_webkit:
-        description: 'WebKit (Safari)'
-        required: false
-        default: false
-        type: boolean
 
 permissions:
   actions: read
@@ -78,6 +39,18 @@ env:
   TEST_ENV:     ${{ github.event.inputs.environment || 'uat' }}
   BASELINE_ENV: ${{ github.event.inputs.baseline_env || github.event.inputs.environment || 'uat' }}
 
+  # All 9 projects — always
+  ALL_PROJECTS: >-
+    --project=desktop-chromium
+    --project=tablet-chromium
+    --project=mobile-chromium
+    --project=desktop-firefox
+    --project=tablet-firefox
+    --project=mobile-firefox
+    --project=desktop-webkit
+    --project=tablet-webkit
+    --project=mobile-webkit
+
 jobs:
 
   visual-tests:
@@ -85,7 +58,7 @@ jobs:
 
     steps:
 
-      # ── Checkout & install ────────────────────────────────────────────────────
+      # ── Checkout & install ────────────────────────────────────────────────
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
@@ -95,75 +68,40 @@ jobs:
 
       - run: npm ci
 
-      # ── Build project + browser matrix from checkbox inputs ──────────────
-      - name: Build test matrix
-        run: |
-          DESKTOP="${{ github.event.inputs.viewport_desktop }}"
-          TABLET="${{ github.event.inputs.viewport_tablet }}"
-          MOBILE="${{ github.event.inputs.viewport_mobile }}"
-          CHROMIUM="${{ github.event.inputs.browser_chromium }}"
-          FIREFOX="${{ github.event.inputs.browser_firefox }}"
-          WEBKIT="${{ github.event.inputs.browser_webkit }}"
+      # Always install all three engines
+      - run: npx playwright install chromium firefox webkit --with-deps
 
-          # Default to desktop + chromium when nothing is checked
-          if [ "$DESKTOP" != "true" ] && [ "$TABLET" != "true" ] && [ "$MOBILE" != "true" ]; then DESKTOP="true"; fi
-          if [ "$CHROMIUM" != "true" ] && [ "$FIREFOX" != "true" ] && [ "$WEBKIT" != "true" ]; then CHROMIUM="true"; fi
-
-          PROJECTS=""
-          [ "$DESKTOP"  = "true" ] && [ "$CHROMIUM" = "true" ] && PROJECTS="$PROJECTS --project=desktop-chromium"
-          [ "$DESKTOP"  = "true" ] && [ "$FIREFOX"  = "true" ] && PROJECTS="$PROJECTS --project=desktop-firefox"
-          [ "$DESKTOP"  = "true" ] && [ "$WEBKIT"   = "true" ] && PROJECTS="$PROJECTS --project=desktop-webkit"
-          [ "$TABLET"   = "true" ] && [ "$CHROMIUM" = "true" ] && PROJECTS="$PROJECTS --project=tablet-chromium"
-          [ "$TABLET"   = "true" ] && [ "$FIREFOX"  = "true" ] && PROJECTS="$PROJECTS --project=tablet-firefox"
-          [ "$TABLET"   = "true" ] && [ "$WEBKIT"   = "true" ] && PROJECTS="$PROJECTS --project=tablet-webkit"
-          [ "$MOBILE"   = "true" ] && [ "$CHROMIUM" = "true" ] && PROJECTS="$PROJECTS --project=mobile-chromium"
-          [ "$MOBILE"   = "true" ] && [ "$FIREFOX"  = "true" ] && PROJECTS="$PROJECTS --project=mobile-firefox"
-          [ "$MOBILE"   = "true" ] && [ "$WEBKIT"   = "true" ] && PROJECTS="$PROJECTS --project=mobile-webkit"
-          echo "PROJECT_FLAGS=${PROJECTS# }" >> $GITHUB_ENV
-
-          BROWSERS=""
-          [ "$CHROMIUM" = "true" ] && BROWSERS="$BROWSERS chromium"
-          [ "$FIREFOX"  = "true" ] && BROWSERS="$BROWSERS firefox"
-          [ "$WEBKIT"   = "true" ] && BROWSERS="$BROWSERS webkit"
-          echo "INSTALL_BROWSERS=${BROWSERS# }" >> $GITHUB_ENV
-
-          echo "Projects : ${PROJECTS# }"
-          echo "Browsers : ${BROWSERS# }"
-
-      - run: npx playwright install ${{ env.INSTALL_BROWSERS }} --with-deps
-
-      # ── Detect mode: same-env or cross-env ───────────────────────────────────
+      # ── Detect mode ───────────────────────────────────────────────────────
       - name: Detect validation mode
         run: |
           TEST_ENV="${{ env.TEST_ENV }}"
           BASELINE_ENV="${{ env.BASELINE_ENV }}"
-
           if [ "$TEST_ENV" = "$BASELINE_ENV" ]; then
             echo "VALIDATION_MODE=same-env" >> $GITHUB_ENV
-            echo "📌 Mode: Same-Environment — comparing ${TEST_ENV^^} against its own previous baseline"
+            echo "📌 Mode: Same-Environment — ${TEST_ENV^^} vs its own previous baseline"
           else
             echo "VALIDATION_MODE=cross-env" >> $GITHUB_ENV
-            echo "📌 Mode: Cross-Environment — comparing ${BASELINE_ENV^^} baseline against ${TEST_ENV^^}"
+            echo "📌 Mode: Cross-Environment — ${BASELINE_ENV^^} baseline vs ${TEST_ENV^^}"
           fi
 
-      # ── Clear any locally committed snapshots ────────────────────────────────
+      # ── Clear any locally committed snapshots ────────────────────────────
       - name: Clear local snapshots
         run: rm -rf snapshots/
 
-      # ── Download baseline for BASELINE_ENV ───────────────────────────────────
-      # continue-on-error: true — a missing artifact is not a failure.
-      # The next step handles that case with a clear log and first-run message.
+      # ── Download baseline ─────────────────────────────────────────────────
+      # Uses a separate artifact namespace (visual-cb-baseline-*) so this
+      # workflow's baselines never collide with visual-regression.yml's.
       - name: Download baseline
         id: download-baseline
         uses: dawidd6/action-download-artifact@v6
         continue-on-error: true
         with:
-          name:             visual-baseline-${{ env.BASELINE_ENV }}
+          name:             visual-cb-baseline-${{ env.BASELINE_ENV }}
           path:             snapshots/
-          workflow:         visual-regression.yml
+          workflow:         visual-cross-browser.yml
           search_artifacts: true
 
-      # ── Log baseline context ──────────────────────────────────────────────────
+      # ── Log baseline context ──────────────────────────────────────────────
       - name: Read baseline metadata
         run: |
           TEST_ENV="${{ env.TEST_ENV }}"
@@ -186,12 +124,14 @@ jobs:
               echo "║  CROSS-ENVIRONMENT COMPARISON                        ║"
               echo "║  Baseline : ${BASELINE_ENV^^} — Run #${PREV_RUN} — ${PREV_DATE}"
               echo "║  Testing  : ${TEST_ENV^^} — ${SNAPSHOT_COUNT} snapshots loaded"
+              echo "║  Matrix   : Chrome · Firefox · Safari × D · T · M   ║"
               echo "╚══════════════════════════════════════════════════════╝"
             else
               echo "╔══════════════════════════════════════════════════════╗"
               echo "║  SAME-ENVIRONMENT REGRESSION CHECK                   ║"
               echo "║  Baseline : ${BASELINE_ENV^^} — Run #${PREV_RUN} — ${PREV_DATE}"
               echo "║  Testing  : ${TEST_ENV^^} — ${SNAPSHOT_COUNT} snapshots loaded"
+              echo "║  Matrix   : Chrome · Firefox · Safari × D · T · M   ║"
               echo "╚══════════════════════════════════════════════════════╝"
             fi
 
@@ -206,24 +146,21 @@ jobs:
               echo "║  ⚠️  NO BASELINE FOUND FOR ${BASELINE_ENV^^}                ║"
               echo "║                                                      ║"
               echo "║  Steps to enable cross-env comparison:               ║"
-              echo "║    1. Run with environment=${BASELINE_ENV^^} (no baseline_env) ║"
-              echo "║    2. Then re-run with environment=${TEST_ENV^^},          ║"
-              echo "║       baseline_env=${BASELINE_ENV^^}                        ║"
+              echo "║    1. Run with environment=${BASELINE_ENV} (no baseline_env)  ║"
+              echo "║    2. Re-run with environment=${TEST_ENV}, baseline_env=${BASELINE_ENV} ║"
               echo "║                                                      ║"
-              echo "║  This run will create a fresh baseline for ${TEST_ENV^^}.  ║"
+              echo "║  This run creates a fresh baseline for ${TEST_ENV^^}.       ║"
               echo "╚══════════════════════════════════════════════════════╝"
             else
               echo "╔══════════════════════════════════════════════════════╗"
               echo "║  FIRST RUN — No baseline found for ${TEST_ENV^^}          ║"
-              echo "║  Screenshots captured this run become the baseline.  ║"
-              echo "║  Next run will compare against these screenshots.    ║"
+              echo "║  All 9 project screenshots captured this run.        ║"
+              echo "║  Next run will compare against these.                ║"
               echo "╚══════════════════════════════════════════════════════╝"
             fi
           fi
 
-      # ── Run visual tests ──────────────────────────────────────────────────────
-      # Reporters: html (Cloudflare deploy), github (PR annotations), json (Slack parsing)
-      # --update-snapshots=missing: compares existing baselines, auto-creates for new pages
+      # ── Run visual tests — all 9 projects ────────────────────────────────
       - name: Run visual tests
         continue-on-error: true
         env:
@@ -252,7 +189,7 @@ jobs:
           START_TIME=$(date +%s)
           echo "START_TIME=$START_TIME" >> $GITHUB_ENV
           if TEST_ENV=${{ env.TEST_ENV }} npx playwright test esc.visual esc.portal \
-            ${{ env.PROJECT_FLAGS }} \
+            ${{ env.ALL_PROJECTS }} \
             --workers=20 \
             --update-snapshots=missing \
             --reporter=html,github,json; then
@@ -261,7 +198,7 @@ jobs:
             echo "TEST_STATUS=failed" >> $GITHUB_ENV
           fi
 
-      # ── Parse test results ────────────────────────────────────────────────────
+      # ── Categorise failures ───────────────────────────────────────────────
       - name: Parse test results
         if: always()
         run: |
@@ -344,12 +281,10 @@ jobs:
           echo "  Total failed : $TOTAL_FAIL"
           echo "────────────────────────────────────────────"
 
-      # ── Roll the baseline forward ─────────────────────────────────────────────
-      # --update-snapshots=missing never overwrites an existing baseline, even when
-      # a test fails. Without this step the original baseline would be carried
-      # forward indefinitely. We copy the "actual" screenshots Playwright saved for
-      # every failing test over their corresponding baseline file so the next run
-      # always compares against the most recently captured state.
+      # ── Roll baseline forward ─────────────────────────────────────────────
+      # Copies test-results/*-actual.png over the matching snapshot so the
+      # next run compares against the current run's screenshots, not the
+      # original first-ever capture.
       - name: Roll baseline forward
         if: always()
         run: |
@@ -372,7 +307,7 @@ jobs:
             echo "  No actual screenshots found — baseline unchanged"
           fi
 
-      # ── Write baseline metadata ───────────────────────────────────────────────
+      # ── Write baseline metadata ───────────────────────────────────────────
       - name: Write baseline metadata
         if: always()
         run: |
@@ -387,9 +322,9 @@ jobs:
           }
           EOF
 
-      # ── Deploy HTML report to Cloudflare Pages ────────────────────────────────
-      # Only runs when there are actual visual diff failures — execution errors
-      # produce no diff images so the HTML report adds no value in that case.
+      # ── Deploy HTML report to Cloudflare Pages ────────────────────────────
+      # The report contains all 9 projects in one view — grouped by project
+      # in the Playwright HTML reporter. Only deployed when there are visual diffs.
       - name: Deploy HTML report
         if: always() && env.HAS_VISUAL_DIFFS == 'true'
         id: cf-deploy
@@ -402,7 +337,7 @@ jobs:
           directory:   playwright-report
           branch:      ${{ env.TEST_ENV }}
 
-      # ── Notify Slack ──────────────────────────────────────────────────────────
+      # ── Notify Slack ──────────────────────────────────────────────────────
       - name: Notify Slack
         if: always()
         continue-on-error: true
@@ -463,18 +398,19 @@ jobs:
             --arg has_diffs "$HAS_VISUAL_DIFFS" \
             --argjson exec_block "$EXEC_BLOCK" \
             '{
-              text: ($icon+" Visual Regression — "+$comparing+" — "+$status_label),
+              text: ($icon+" Cross-Browser Visual — "+$comparing+" — "+$status_label),
               attachments: [{
                 color: $color,
                 blocks: (
                   [
-                    { type:"header", text:{ type:"plain_text", text:"🎭 Visual Regression Report", emoji:true } },
+                    { type:"header", text:{ type:"plain_text", text:"🌐 Cross-Browser Visual Report", emoji:true } },
                     { type:"section", fields:[
                         { type:"mrkdwn", text:("*Comparing*\n`"+$comparing+"`") },
                         { type:"mrkdwn", text:("*Status*\n"+$status_field) },
                         { type:"mrkdwn", text:("*Test Env*\n`"+$env_field+"`") },
                         { type:"mrkdwn", text:("*Duration*\n"+$duration) }
-                    ]}
+                    ]},
+                    { type:"section", text:{ type:"mrkdwn", text:"*Matrix*\nChrome · Firefox · Safari  ×  Desktop · Tablet · Mobile" } }
                   ]
                   + (if $exec_block != null then [$exec_block] else [] end)
                   + [{
@@ -494,7 +430,7 @@ jobs:
             -H 'Content-Type: application/json' \
             -d "$PAYLOAD"
 
-      # ── GitHub Actions job summary ────────────────────────────────────────────
+      # ── GitHub Actions job summary ────────────────────────────────────────
       - name: Job summary
         if: always()
         run: |
@@ -526,30 +462,29 @@ jobs:
           fi
 
           {
-            echo "## Visual Regression"
+            echo "## Cross-Browser Visual Report"
             echo "| | |"
             echo "|---|---|"
-            echo "| **Mode**              | ${{ env.VALIDATION_MODE }} |"
-            echo "| **Comparing**         | ${COMPARING} |"
-            echo "| **Test environment**  | \`${ENV^^}\` |"
-            echo "| **Baseline env**      | \`${BASELINE_ENV^^}\` |"
-            echo "| **Base URL**          | ${BASE_URL} |"
-            echo "| **Projects**          | \`${{ env.PROJECT_FLAGS }}\` |"
-            echo "| **Passed**            | ${{ env.PASSED_COUNT }} |"
-            echo "| **Visual diffs**      | ${{ env.VISUAL_FAIL_COUNT }} |"
-            echo "| **Execution errors**  | ${{ env.EXEC_ERROR_COUNT }} |"
-            echo "| **Run**               | [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) |"
-            [ -n "$REPORT_URL" ] && echo "| **HTML Report** | [$REPORT_URL]($REPORT_URL) |"
+            echo "| **Mode**             | ${{ env.VALIDATION_MODE }} |"
+            echo "| **Comparing**        | ${COMPARING} |"
+            echo "| **Test environment** | \`${ENV^^}\` |"
+            echo "| **Baseline env**     | \`${BASELINE_ENV^^}\` |"
+            echo "| **Base URL**         | ${BASE_URL} |"
+            echo "| **Browsers**         | Chrome · Firefox · Safari |"
+            echo "| **Viewports**        | Desktop 1440×900 · Tablet iPad Pro 11 · Mobile Pixel 7 / iPhone 14 |"
+            echo "| **Passed**           | ${{ env.PASSED_COUNT }} |"
+            echo "| **Visual diffs**     | ${{ env.VISUAL_FAIL_COUNT }} |"
+            echo "| **Execution errors** | ${{ env.EXEC_ERROR_COUNT }} |"
+            echo "| **Run**              | [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) |"
+            [ -n "$REPORT_URL" ] && echo "| **HTML Report**      | [$REPORT_URL]($REPORT_URL) |"
           } >> $GITHUB_STEP_SUMMARY
 
-      # ── Save updated baseline for TEST_ENV ───────────────────────────────────
-      # snapshots/ now contains the rolled-forward baseline (actual screenshots
-      # from this run have replaced any old baselines for failing tests).
+      # ── Save baseline ─────────────────────────────────────────────────────
       - name: Save baseline
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name:           visual-baseline-${{ env.TEST_ENV }}
+          name:           visual-cb-baseline-${{ env.TEST_ENV }}
           path:           snapshots/
           retention-days: 3
           overwrite:      true
