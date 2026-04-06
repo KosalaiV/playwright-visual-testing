@@ -253,7 +253,7 @@ jobs:
           echo "START_TIME=$START_TIME" >> $GITHUB_ENV
           if TEST_ENV=${{ env.TEST_ENV }} npx playwright test esc.visual esc.portal \
             ${{ env.PROJECT_FLAGS }} \
-            --workers=20 \
+            --workers=8 \
             --update-snapshots=missing \
             --reporter=html,github,json; then
             echo "TEST_STATUS=passed" >> $GITHUB_ENV
@@ -388,10 +388,10 @@ jobs:
           EOF
 
       # ── Deploy HTML report to Cloudflare Pages ────────────────────────────────
-      # Only runs when there are actual visual diff failures — execution errors
-      # produce no diff images so the HTML report adds no value in that case.
+      # Always deployed so teams can review baseline captures and skipped tests,
+      # not just visual differences.
       - name: Deploy HTML report
-        if: always() && env.HAS_VISUAL_DIFFS == 'true'
+        if: always()
         id: cf-deploy
         uses: cloudflare/pages-action@v1
         continue-on-error: true

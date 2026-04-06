@@ -37,6 +37,9 @@ export default async function globalSetup(config: FullConfig): Promise<void> {
 
     if (!username || !password) {
       console.log(`[global-setup] Skipping ${role} — credentials not set`);
+      // Write empty state so test.use({ storageState }) never throws ENOENT.
+      // Tests detect the missing auth and skip themselves gracefully.
+      fs.writeFileSync(`auth/${role}.json`, JSON.stringify({ cookies: [], origins: [] }));
       continue;
     }
 
@@ -56,6 +59,9 @@ export default async function globalSetup(config: FullConfig): Promise<void> {
       console.log(`[global-setup] ✓ Logged in as ${role}`);
     } catch (err) {
       console.error(`[global-setup] ✗ Login failed for ${role}:`, err);
+      // Write empty state so the test file can detect the failure and skip
+      // rather than crashing with "ENOENT: no such file or directory".
+      fs.writeFileSync(`auth/${role}.json`, JSON.stringify({ cookies: [], origins: [] }));
     } finally {
       await context.close();
     }

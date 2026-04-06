@@ -166,7 +166,7 @@ jobs:
           echo "START_TIME=$START_TIME" >> $GITHUB_ENV
           if TEST_ENV=${{ env.TEST_ENV }} npx playwright test esc.visual esc.portal \
             --project=desktop \
-            --workers=20 \
+            --workers=8 \
             --update-snapshots=missing \
             --reporter=html,github,json; then
             echo "TEST_STATUS=passed" >> $GITHUB_ENV
@@ -309,7 +309,7 @@ jobs:
       # Only deployed when there are visual diff failures — execution errors don't
       # produce diff images so there's nothing useful to show in the HTML report.
       - name: Deploy to Cloudflare Pages
-        if: always() && env.HAS_VISUAL_DIFFS == 'true'
+        if: always()
         id: cf-deploy
         uses: cloudflare/pages-action@v1
         continue-on-error: true

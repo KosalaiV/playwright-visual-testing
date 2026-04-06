@@ -45,7 +45,8 @@ export default defineConfig({
 
   retries: 0,
   fullyParallel: true,
-  workers: process.env.CI ? 5 : undefined, // better local dev
+  // CI: 4 workers is safe on 2-core GitHub runners; workflows override per-job
+  workers: process.env.CI ? 4 : undefined,
 
   reporter: process.env.CI
     ? [
@@ -114,10 +115,11 @@ export default defineConfig({
       name: 'desktop-firefox',
       use: { ...devices['Desktop Firefox'],  viewport: { width: 1440, height: 900 } },
     },
-    // Tablet: iPad Pro 11 characteristics (touch, DPR, viewport) on Gecko engine
+    // Tablet: tablet-sized viewport on Gecko engine — uses Desktop Firefox UA
+    // (iPad Pro UA is Safari-specific; emulating it in Firefox produces inconsistent results)
     {
       name: 'tablet-firefox',
-      use: { ...devices['iPad Pro 11'] },
+      use: { ...devices['Desktop Firefox'], viewport: { width: 834, height: 1194 } },
     },
     // Mobile: Pixel 7 characteristics (touch, DPR, viewport) on Gecko engine
     {

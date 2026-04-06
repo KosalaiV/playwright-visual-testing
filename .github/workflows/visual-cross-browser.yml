@@ -1,18 +1,30 @@
 name: Visual Cross-Browser
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Runs all 9 browser × viewport combinations automatically — no checkboxes.
+# 9 parallel runners: 3 browsers × 3 shards each → ~25-35 min wall-clock
 #
-#   Browsers  : Chrome (Chromium)  ·  Firefox  ·  Safari (WebKit)
-#   Viewports : Desktop 1440×900  ·  Tablet iPad Pro 11  ·  Mobile Pixel 7 / iPhone 14
+#   Browsers  : Chrome · Firefox · Safari
+#   Viewports : Desktop · Tablet · Mobile  (all in each runner)
 #
-# Identical to Percy / BrowserStack philosophy: one trigger, full matrix, one report.
+# How sharding works:
+#   Playwright divides the full test list equally across N runners.
+#   With 690 tests per browser, each shard gets ~230 tests.
+#   At 8 workers + ~35s/test → ~17 min test time per shard (was 51 min).
+#
+# Runner layout (all 9 start simultaneously):
+#   chromium-1  chromium-2  chromium-3
+#   firefox-1   firefox-2   firefox-3
+#   webkit-1    webkit-2    webkit-3
+#        └─────────────────────────┘
+#                    │
+#            merge-and-report   ← combines 9 blob reports → HTML → Cloudflare
 #
 # Baseline isolation:
-#   • Artifact name: visual-cb-baseline-<env>  (separate from visual-regression.yml)
-#   • Rolling baseline: after each run the actual screenshots replace the stored
-#     baseline so the next run always compares against the latest captured state
-#   • First run: no baseline → all 9 sets captured → saved → next run compares
+#   Each browser has its own artifact: visual-cb-baseline-<env>-<browser>
+#   Merge job applies:
+#     (a) new snapshots (from --update-snapshots=missing) from all 3 shards
+#     (b) roll-forward actuals (diff screenshots) from all 3 shards
+#   This ensures ALL changed pages — not just shard-1's — get rolled forward.
 # ─────────────────────────────────────────────────────────────────────────────
 
 on:
@@ -31,6 +43,13 @@ on:
         default: ''
         type: string
 
+      browsers:
+        description: 'Which browsers to run'
+        required: false
+        default: 'all'
+        type: choice
+        options: [all, chromium-only, firefox-only, webkit-only]
+
 permissions:
   actions: read
   contents: read
@@ -38,27 +57,56 @@ permissions:
 env:
   TEST_ENV:     ${{ github.event.inputs.environment || 'uat' }}
   BASELINE_ENV: ${{ github.event.inputs.baseline_env || github.event.inputs.environment || 'uat' }}
+  TOTAL_SHARDS: 3
 
-  # All 9 projects — always
-  ALL_PROJECTS: >-
-    --project=desktop-chromium
-    --project=tablet-chromium
-    --project=mobile-chromium
-    --project=desktop-firefox
-    --project=tablet-firefox
-    --project=mobile-firefox
-    --project=desktop-webkit
-    --project=tablet-webkit
-    --project=mobile-webkit
-
+# ─────────────────────────────────────────────────────────────────────────────
 jobs:
 
-  visual-tests:
+  # ── Capture wall-clock start (used in Slack duration) ─────────────────────
+  record-start:
     runs-on: ubuntu-latest
+    outputs:
+      start-time: ${{ steps.t.outputs.time }}
+    steps:
+      - id: t
+        run: echo "time=$(date +%s)" >> $GITHUB_OUTPUT
+
+  # ── 9 parallel shard jobs ─────────────────────────────────────────────────
+  test:
+    name: "${{ matrix.browser }} · shard ${{ matrix.shard }}/${{ strategy.job-total }}"
+    runs-on: ubuntu-latest
+    needs: record-start
+
+    if: |
+      github.event.inputs.browsers == 'all' ||
+      github.event.inputs.browsers == '' ||
+      github.event.inputs.browsers == format('{0}-only', matrix.browser)
+
+    strategy:
+      fail-fast: false
+      matrix:
+        browser: [chromium, firefox, webkit]
+        shard:   [1, 2, 3]
+        include:
+          - browser: chromium
+            projects: >-
+              --project=desktop-chromium
+              --project=tablet-chromium
+              --project=mobile-chromium
+          - browser: firefox
+            projects: >-
+              --project=desktop-firefox
+              --project=tablet-firefox
+              --project=mobile-firefox
+          - browser: webkit
+            projects: >-
+              --project=desktop-webkit
+              --project=tablet-webkit
+              --project=mobile-webkit
 
     steps:
 
-      # ── Checkout & install ────────────────────────────────────────────────
+      # ── Checkout & install ───────────────────────────────────────────────
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
@@ -68,103 +116,47 @@ jobs:
 
       - run: npm ci
 
-      # Always install all three engines
-      - run: npx playwright install chromium firefox webkit --with-deps
+      # Install only this job's browser engine — saves 3-4 min vs all three
+      - run: npx playwright install ${{ matrix.browser }} --with-deps
 
-      # ── Detect mode ───────────────────────────────────────────────────────
-      - name: Detect validation mode
-        run: |
-          TEST_ENV="${{ env.TEST_ENV }}"
-          BASELINE_ENV="${{ env.BASELINE_ENV }}"
-          if [ "$TEST_ENV" = "$BASELINE_ENV" ]; then
-            echo "VALIDATION_MODE=same-env" >> $GITHUB_ENV
-            echo "📌 Mode: Same-Environment — ${TEST_ENV^^} vs its own previous baseline"
-          else
-            echo "VALIDATION_MODE=cross-env" >> $GITHUB_ENV
-            echo "📌 Mode: Cross-Environment — ${BASELINE_ENV^^} baseline vs ${TEST_ENV^^}"
-          fi
-
-      # ── Clear any locally committed snapshots ────────────────────────────
+      # ── Download browser-specific baseline ───────────────────────────────
       - name: Clear local snapshots
         run: rm -rf snapshots/
 
-      # ── Download baseline ─────────────────────────────────────────────────
-      # Uses a separate artifact namespace (visual-cb-baseline-*) so this
-      # workflow's baselines never collide with visual-regression.yml's.
-      - name: Download baseline
-        id: download-baseline
+      - name: Download baseline (${{ matrix.browser }})
         uses: dawidd6/action-download-artifact@v6
         continue-on-error: true
         with:
-          name:             visual-cb-baseline-${{ env.BASELINE_ENV }}
+          name:             visual-cb-baseline-${{ env.BASELINE_ENV }}-${{ matrix.browser }}
           path:             snapshots/
           workflow:         visual-cross-browser.yml
           search_artifacts: true
 
-      # ── Log baseline context ──────────────────────────────────────────────
-      - name: Read baseline metadata
+      - name: Log baseline
         run: |
-          TEST_ENV="${{ env.TEST_ENV }}"
-          BASELINE_ENV="${{ env.BASELINE_ENV }}"
-          VALIDATION_MODE="${{ env.VALIDATION_MODE }}"
           META="snapshots/baseline-meta.json"
-
           if [ -f "$META" ]; then
-            PREV_ENV=$(jq -r '.env         // "unknown"' "$META")
-            PREV_RUN=$(jq -r '.run_number  // "?"'       "$META")
-            PREV_DATE=$(jq -r '.date       // "unknown"' "$META")
-            SNAPSHOT_COUNT=$(find snapshots -name '*.png' | wc -l | tr -d ' ')
-            echo "PREV_ENV=$PREV_ENV"   >> $GITHUB_ENV
-            echo "PREV_RUN=$PREV_RUN"   >> $GITHUB_ENV
-            echo "PREV_DATE=$PREV_DATE" >> $GITHUB_ENV
-            echo "BASELINE_FOUND=true"  >> $GITHUB_ENV
-
-            if [ "$VALIDATION_MODE" = "cross-env" ]; then
-              echo "╔══════════════════════════════════════════════════════╗"
-              echo "║  CROSS-ENVIRONMENT COMPARISON                        ║"
-              echo "║  Baseline : ${BASELINE_ENV^^} — Run #${PREV_RUN} — ${PREV_DATE}"
-              echo "║  Testing  : ${TEST_ENV^^} — ${SNAPSHOT_COUNT} snapshots loaded"
-              echo "║  Matrix   : Chrome · Firefox · Safari × D · T · M   ║"
-              echo "╚══════════════════════════════════════════════════════╝"
-            else
-              echo "╔══════════════════════════════════════════════════════╗"
-              echo "║  SAME-ENVIRONMENT REGRESSION CHECK                   ║"
-              echo "║  Baseline : ${BASELINE_ENV^^} — Run #${PREV_RUN} — ${PREV_DATE}"
-              echo "║  Testing  : ${TEST_ENV^^} — ${SNAPSHOT_COUNT} snapshots loaded"
-              echo "║  Matrix   : Chrome · Firefox · Safari × D · T · M   ║"
-              echo "╚══════════════════════════════════════════════════════╝"
-            fi
-
+            SNAPS=$(find snapshots -name '*.png' | wc -l | tr -d ' ')
+            echo "Baseline: Run #$(jq -r '.run_number // "?"' "$META") — $SNAPS snapshots"
           else
-            echo "PREV_ENV=none" >> $GITHUB_ENV
-            echo "PREV_RUN="     >> $GITHUB_ENV
-            echo "PREV_DATE="    >> $GITHUB_ENV
-            echo "BASELINE_FOUND=false" >> $GITHUB_ENV
-
-            if [ "$VALIDATION_MODE" = "cross-env" ]; then
-              echo "╔══════════════════════════════════════════════════════╗"
-              echo "║  ⚠️  NO BASELINE FOUND FOR ${BASELINE_ENV^^}                ║"
-              echo "║                                                      ║"
-              echo "║  Steps to enable cross-env comparison:               ║"
-              echo "║    1. Run with environment=${BASELINE_ENV} (no baseline_env)  ║"
-              echo "║    2. Re-run with environment=${TEST_ENV}, baseline_env=${BASELINE_ENV} ║"
-              echo "║                                                      ║"
-              echo "║  This run creates a fresh baseline for ${TEST_ENV^^}.       ║"
-              echo "╚══════════════════════════════════════════════════════╝"
-            else
-              echo "╔══════════════════════════════════════════════════════╗"
-              echo "║  FIRST RUN — No baseline found for ${TEST_ENV^^}          ║"
-              echo "║  All 9 project screenshots captured this run.        ║"
-              echo "║  Next run will compare against these.                ║"
-              echo "╚══════════════════════════════════════════════════════╝"
-            fi
+            echo "No baseline found — first run for ${{ matrix.browser }}"
           fi
 
-      # ── Run visual tests — all 9 projects ────────────────────────────────
-      - name: Run visual tests
+      # ── Record existing snapshot names (for delta detection later) ───────
+      # We only upload snapshots that are NEW this run (created by
+      # --update-snapshots=missing for pages that had no baseline yet).
+      # This keeps the artifact tiny on subsequent runs.
+      - name: Record pre-run snapshot list
+        run: |
+          find snapshots -name '*.png' | sed 's|^snapshots/||' | sort \
+            > /tmp/before-snapshots.txt
+          echo "Pre-run snapshots: $(wc -l < /tmp/before-snapshots.txt)"
+
+      # ── Run this shard ───────────────────────────────────────────────────
+      - name: Run visual tests (${{ matrix.browser }} · shard ${{ matrix.shard }}/3)
         continue-on-error: true
         env:
-          PLAYWRIGHT_JSON_OUTPUT_NAME: results.json
+          PLAYWRIGHT_JSON_OUTPUT_NAME: results-${{ matrix.browser }}-${{ matrix.shard }}.json
           HTACCESS_USER:          ${{ secrets.HTACCESS_USER }}
           HTACCESS_PASS:          ${{ secrets.HTACCESS_PASS }}
           STUDENT_USERNAME:       ${{ secrets.STUDENT_USERNAME }}
@@ -186,147 +178,186 @@ jobs:
           CONTENTEDITOR_USERNAME: ${{ secrets.CONTENTEDITOR_USERNAME }}
           CONTENTEDITOR_PASSWORD: ${{ secrets.CONTENTEDITOR_PASSWORD }}
         run: |
-          START_TIME=$(date +%s)
-          echo "START_TIME=$START_TIME" >> $GITHUB_ENV
-          if TEST_ENV=${{ env.TEST_ENV }} npx playwright test esc.visual esc.portal \
-            ${{ env.ALL_PROJECTS }} \
-            --workers=20 \
+          TEST_ENV=${{ env.TEST_ENV }} npx playwright test esc.visual esc.portal \
+            ${{ matrix.projects }} \
+            --shard=${{ matrix.shard }}/3 \
+            --workers=8 \
             --update-snapshots=missing \
-            --reporter=html,github,json; then
-            echo "TEST_STATUS=passed" >> $GITHUB_ENV
-          else
-            echo "TEST_STATUS=failed" >> $GITHUB_ENV
-          fi
+            --reporter=blob,github,json
 
-      # ── Categorise failures ───────────────────────────────────────────────
-      - name: Parse test results
+      # ── Collect new snapshots (delta only — much smaller than full set) ──
+      - name: Collect snapshot delta
         if: always()
         run: |
-          RESULTS="results.json"
+          find snapshots -name '*.png' | sed 's|^snapshots/||' | sort \
+            > /tmp/after-snapshots.txt
 
-          if [ ! -f "$RESULTS" ]; then
-            echo "⚠️ results.json not found — Playwright may have failed to start"
-            echo "PASSED_COUNT=0"          >> $GITHUB_ENV
-            echo "VISUAL_FAIL_COUNT=0"     >> $GITHUB_ENV
-            echo "HAS_VISUAL_DIFFS=false"  >> $GITHUB_ENV
-            echo "EXEC_ERROR_COUNT=0"      >> $GITHUB_ENV
-            echo "TOTAL_FAIL_COUNT=0"      >> $GITHUB_ENV
-            exit 0
+          mkdir -p snapshot-delta
+          comm -13 /tmp/before-snapshots.txt /tmp/after-snapshots.txt \
+            | while IFS= read -r rel; do
+                dest_dir="snapshot-delta/$(dirname "$rel")"
+                mkdir -p "$dest_dir"
+                cp "snapshots/$rel" "$dest_dir/"
+              done
+
+          NEW=$(find snapshot-delta -name '*.png' | wc -l | tr -d ' ')
+          echo "New snapshots this shard: $NEW"
+
+      # ── Collect actual screenshots from failing tests ─────────────────────
+      - name: Collect test actuals
+        if: always()
+        run: |
+          mkdir -p test-actuals
+          find test-results -name '*-actual.png' \
+            -exec cp {} test-actuals/ \; 2>/dev/null || true
+          echo "Actuals: $(find test-actuals -name '*.png' | wc -l)"
+
+      # ── Upload artifacts for merge job ───────────────────────────────────
+      - name: Upload blob report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name:            blob-report-${{ matrix.browser }}-${{ matrix.shard }}
+          path:            blob-report/
+          retention-days:  1
+
+      - name: Upload JSON results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name:            json-results-${{ matrix.browser }}-${{ matrix.shard }}
+          path:            results-${{ matrix.browser }}-${{ matrix.shard }}.json
+          retention-days:  1
+          if-no-files-found: warn
+
+      - name: Upload snapshot delta
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name:            snapshot-delta-${{ matrix.browser }}-${{ matrix.shard }}
+          path:            snapshot-delta/
+          retention-days:  1
+          if-no-files-found: ignore
+
+      - name: Upload test actuals
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name:            test-actuals-${{ matrix.browser }}-${{ matrix.shard }}
+          path:            test-actuals/
+          retention-days:  1
+          if-no-files-found: ignore
+
+  # ── Merge reports + aggregate stats + save baseline ──────────────────────
+  merge-and-report:
+    name: Merge · Report · Save Baseline
+    runs-on: ubuntu-latest
+    needs: [record-start, test]
+    if: always()
+
+    steps:
+
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - run: npm ci
+      # No browser binaries needed — merge-reports is a CLI-only command
+
+      # ── HTML report: download all 9 blob reports → merge ─────────────────
+      - name: Download blob reports
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          pattern:        blob-report-*
+          path:           all-blobs/
+          merge-multiple: true
+
+      - name: Merge HTML report
+        run: |
+          BLOB_COUNT=$(find all-blobs -name '*.zip' 2>/dev/null | wc -l | tr -d ' ')
+          if [ "$BLOB_COUNT" -gt 0 ]; then
+            echo "Merging $BLOB_COUNT blob(s) into HTML report…"
+            npx playwright merge-reports \
+              --reporter html \
+              --output playwright-report \
+              ./all-blobs
+          else
+            echo "No blob reports — creating placeholder"
+            mkdir -p playwright-report
+            printf '<!DOCTYPE html><html><body><h2>No test results</h2></body></html>' \
+              > playwright-report/index.html
           fi
 
-          PASSED=$(jq '.stats.expected // 0' "$RESULTS")
-          echo "PASSED_COUNT=$PASSED" >> $GITHUB_ENV
+      # ── Stats: download all 9 JSON results → sum ─────────────────────────
+      - name: Download JSON results
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          pattern:        json-results-*
+          path:           json-results/
+          merge-multiple: true
 
-          ALL_FAILURES=$(jq '[
-            .. | objects | select(has("tests")) |
-            .title as $spec |
-            .tests[] |
-            select(.results[0].status == "failed" or .results[0].status == "timedOut") |
-            { spec: $spec, status: .results[0].status, error: (.results[0].error.message // "Unknown error") }
-          ]' "$RESULTS")
+      - name: Parse combined results
+        if: always()
+        run: |
+          TOTAL_PASSED=0; TOTAL_VISUAL_FAIL=0; TOTAL_EXEC_FAIL=0; TOTAL_SKIPPED=0
 
-          VISUAL_FAILS=$(echo "$ALL_FAILURES" | jq '[.[] | select(.error | test("screenshot|toHaveScreenshot|Screenshot"; "i"))]')
-          VISUAL_COUNT=$(echo "$VISUAL_FAILS" | jq 'length')
-          echo "VISUAL_FAIL_COUNT=$VISUAL_COUNT" >> $GITHUB_ENV
-          echo "HAS_VISUAL_DIFFS=$([ "$VISUAL_COUNT" -gt 0 ] && echo true || echo false)" >> $GITHUB_ENV
+          for f in json-results/results-*.json; do
+            [ -f "$f" ] || continue
 
-          EXEC_FAILS=$(echo "$ALL_FAILURES" | jq '[.[] | select(.error | test("screenshot|toHaveScreenshot|Screenshot"; "i") | not)]')
-          EXEC_COUNT=$(echo "$EXEC_FAILS" | jq 'length')
-          echo "EXEC_ERROR_COUNT=$EXEC_COUNT" >> $GITHUB_ENV
+            P=$(jq '.stats.expected // 0' "$f")
+            TOTAL_PASSED=$((TOTAL_PASSED + P))
 
-          TOTAL_FAIL=$((VISUAL_COUNT + EXEC_COUNT))
-          echo "TOTAL_FAIL_COUNT=$TOTAL_FAIL" >> $GITHUB_ENV
+            S=$(jq '.stats.skipped // 0' "$f")
+            TOTAL_SKIPPED=$((TOTAL_SKIPPED + S))
 
-          # Group exec errors by category — one line per type with count + human-readable message
-          if [ "$EXEC_COUNT" -gt 0 ]; then
-            EXEC_SUMMARY=$(echo "$EXEC_FAILS" | jq -r '
-              def category:
-                if   test("timeout|Timeout|exceeded.*ms"; "i")                            then "⏱ Timeout"
-                elif test("storage state|auth.*json|ENOENT.*auth"; "i")                   then "🔐 Auth Setup Failed"
-                elif test("401|Unauthorized"; "i")                                        then "🔐 HTTP 401 Unauthorized"
-                elif test("403|Forbidden"; "i")                                           then "🔐 HTTP 403 Forbidden"
-                elif test("404|Not Found"; "i")                                           then "🔍 HTTP 404 Not Found"
-                elif test("ERR_NAME_NOT_RESOLVED|ENOTFOUND"; "i")                        then "🌐 DNS Error"
-                elif test("ECONNREFUSED"; "i")                                            then "🌐 Connection Refused"
-                elif test("net::|ERR_"; "i")                                              then "🌐 Network Error"
-                elif test("ERR_CERT|SSL|TLS|certificate"; "i")                           then "🔒 SSL Error"
-                else "⚠️ Error" end;
-              def friendly:
-                if   test("storage state|auth.*json|ENOENT.*auth"; "i")                   then "Auth state files not found — login in global setup likely failed"
-                elif test("401|Unauthorized"; "i")                                        then "Server returned 401 — check credentials or session expiry"
-                elif test("403|Forbidden"; "i")                                           then "Server returned 403 — account may lack access to this page"
-                elif test("404|Not Found"; "i")                                           then "Page returned 404 — URL may have changed or page was removed"
-                elif test("ERR_NAME_NOT_RESOLVED|ENOTFOUND"; "i")                        then "DNS lookup failed — check the environment URL is reachable"
-                elif test("ECONNREFUSED"; "i")                                            then "Connection refused — server may be down or unreachable"
-                elif test("timeout|Timeout|exceeded.*ms"; "i")                           then "Page load timed out — server slow or unresponsive"
-                elif test("ERR_CERT|SSL|TLS|certificate"; "i")                           then "SSL/TLS certificate error"
-                else (split("\n")[0] | .[0:100]) end;
-              group_by(.error | category) |
-              .[:5][] |
-              (.[0].error | category) as $cat |
-              (.[0].error | friendly) as $msg |
-              "\($cat) (\(length) test\(if length == 1 then "" else "s" end))  —  \($msg)"
-            ')
-            {
-              echo "EXEC_SUMMARY<<ENDOFVAR"
-              echo "$EXEC_SUMMARY"
-              echo "ENDOFVAR"
-            } >> $GITHUB_ENV
-          fi
+            V=$(jq '[
+              .. | objects | select(has("tests")) | .tests[] |
+              select(
+                (.results[0].status == "failed" or .results[0].status == "timedOut") and
+                (.results[0].error.message // "" | test("screenshot|toHaveScreenshot|Screenshot"; "i"))
+              )
+            ] | length' "$f")
+            TOTAL_VISUAL_FAIL=$((TOTAL_VISUAL_FAIL + V))
+
+            E=$(jq '[
+              .. | objects | select(has("tests")) | .tests[] |
+              select(
+                (.results[0].status == "failed" or .results[0].status == "timedOut") and
+                (.results[0].error.message // "" | test("screenshot|toHaveScreenshot|Screenshot"; "i") | not)
+              )
+            ] | length' "$f")
+            TOTAL_EXEC_FAIL=$((TOTAL_EXEC_FAIL + E))
+          done
+
+          TOTAL_FAIL=$((TOTAL_VISUAL_FAIL + TOTAL_EXEC_FAIL))
+
+          echo "PASSED_COUNT=$TOTAL_PASSED"           >> $GITHUB_ENV
+          echo "SKIPPED_COUNT=$TOTAL_SKIPPED"         >> $GITHUB_ENV
+          echo "VISUAL_FAIL_COUNT=$TOTAL_VISUAL_FAIL" >> $GITHUB_ENV
+          echo "EXEC_ERROR_COUNT=$TOTAL_EXEC_FAIL"    >> $GITHUB_ENV
+          echo "TOTAL_FAIL_COUNT=$TOTAL_FAIL"         >> $GITHUB_ENV
+          echo "HAS_VISUAL_DIFFS=$([ "$TOTAL_VISUAL_FAIL" -gt 0 ] && echo true || echo false)" >> $GITHUB_ENV
 
           echo "────────────────────────────────────────────"
-          echo "  Passed       : $PASSED"
-          echo "  Visual diffs : $VISUAL_COUNT"
-          echo "  Exec errors  : $EXEC_COUNT"
+          echo "  Browsers     : ${{ github.event.inputs.browsers || 'all' }}"
+          echo "  Shards       : 3 per browser (9 runners total)"
+          echo "  Passed       : $TOTAL_PASSED"
+          echo "  Skipped      : $TOTAL_SKIPPED"
+          echo "  Visual diffs : $TOTAL_VISUAL_FAIL"
+          echo "  Exec errors  : $TOTAL_EXEC_FAIL"
           echo "  Total failed : $TOTAL_FAIL"
           echo "────────────────────────────────────────────"
 
-      # ── Roll baseline forward ─────────────────────────────────────────────
-      # Copies test-results/*-actual.png over the matching snapshot so the
-      # next run compares against the current run's screenshots, not the
-      # original first-ever capture.
-      - name: Roll baseline forward
-        if: always()
-        run: |
-          UPDATED=0
-          while IFS= read -r actual; do
-            snapname=$(basename "$actual" | sed 's/-actual\.png$/.png/')
-            snapshot=$(find snapshots -name "$snapname" 2>/dev/null | head -1)
-            if [ -n "$snapshot" ]; then
-              cp "$actual" "$snapshot"
-              UPDATED=$((UPDATED + 1))
-              echo "  ✔ $snapshot"
-            fi
-          done < <(find test-results -name "*-actual.png" 2>/dev/null)
-
-          if [ "$UPDATED" -gt 0 ]; then
-            echo "────────────────────────────────────────────"
-            echo "  Baseline rolled forward: $UPDATED screenshot(s) updated"
-            echo "────────────────────────────────────────────"
-          else
-            echo "  No actual screenshots found — baseline unchanged"
-          fi
-
-      # ── Write baseline metadata ───────────────────────────────────────────
-      - name: Write baseline metadata
-        if: always()
-        run: |
-          mkdir -p snapshots
-          cat <<EOF > snapshots/baseline-meta.json
-          {
-            "env":        "${{ env.TEST_ENV }}",
-            "run_number": "${{ github.run_number }}",
-            "run_id":     "${{ github.run_id }}",
-            "branch":     "${{ github.ref_name }}",
-            "date":       "$(date -u '+%Y-%m-%d %H:%M UTC')"
-          }
-          EOF
-
-      # ── Deploy HTML report to Cloudflare Pages ────────────────────────────
-      # The report contains all 9 projects in one view — grouped by project
-      # in the Playwright HTML reporter. Only deployed when there are visual diffs.
+      # ── Deploy HTML report ────────────────────────────────────────────────
+      # Always deployed so teams can review baseline captures, skipped tests,
+      # and visual diffs — not just when failures exist.
       - name: Deploy HTML report
-        if: always() && env.HAS_VISUAL_DIFFS == 'true'
+        if: always()
         id: cf-deploy
         uses: cloudflare/pages-action@v1
         continue-on-error: true
@@ -346,83 +377,78 @@ jobs:
         run: |
           ENV="${{ env.TEST_ENV }}"
           BASELINE_ENV="${{ env.BASELINE_ENV }}"
-          PREV_RUN="${{ env.PREV_RUN }}"
-          BASELINE_FOUND="${{ env.BASELINE_FOUND }}"
-          VALIDATION_MODE="${{ env.VALIDATION_MODE }}"
-          TOTAL_FAIL_COUNT="${{ env.TOTAL_FAIL_COUNT }}"
-          EXEC_ERROR_COUNT="${{ env.EXEC_ERROR_COUNT }}"
-          EXEC_SUMMARY="${{ env.EXEC_SUMMARY }}"
-          HAS_VISUAL_DIFFS="${{ env.HAS_VISUAL_DIFFS }}"
+          BROWSERS="${{ github.event.inputs.browsers || 'all' }}"
           REPORT_URL="${{ steps.cf-deploy.outputs.alias || steps.cf-deploy.outputs.url }}"
           RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
 
+          START_TIME="${{ needs.record-start.outputs.start-time }}"
           END_TIME=$(date +%s)
-          ELAPSED=$(( END_TIME - ${{ env.START_TIME }} ))
+          ELAPSED=$(( END_TIME - START_TIME ))
           DURATION="$(( ELAPSED / 60 ))m $(( ELAPSED % 60 ))s"
 
-          # Status — failures always win over first-run label
+          case "$BROWSERS" in
+            chromium-only) MATRIX_LABEL="Chrome · D·T·M · 3 shards" ;;
+            firefox-only)  MATRIX_LABEL="Firefox · D·T·M · 3 shards" ;;
+            webkit-only)   MATRIX_LABEL="Safari · D·T·M · 3 shards" ;;
+            *)             MATRIX_LABEL="Chrome+Firefox+Safari × Desktop+Tablet+Mobile · 9 runners" ;;
+          esac
+
+          TOTAL_FAIL_COUNT="${{ env.TOTAL_FAIL_COUNT }}"
           if [ "$TOTAL_FAIL_COUNT" -gt 0 ]; then
             ICON="❌"; COLOR="#ef4444"; STATUS_LABEL="${TOTAL_FAIL_COUNT} test(s) failed"
-          elif [ "$BASELINE_FOUND" = "false" ]; then
-            ICON="📸"; COLOR="#3b82f6"; STATUS_LABEL="Baseline created"
           else
             ICON="✅"; COLOR="#22c55e"; STATUS_LABEL="All tests passed"
           fi
 
-          # Comparison label
-          if [ "$BASELINE_FOUND" = "false" ]; then
-            COMPARING="First run — baseline created for ${ENV^^}"
-          elif [ "$VALIDATION_MODE" = "cross-env" ]; then
-            COMPARING="Cross-Env: ${BASELINE_ENV^^} (Run #${PREV_RUN}) → ${ENV^^} (Run #${{ github.run_number }})"
-          else
-            COMPARING="Same-Env: ${BASELINE_ENV^^} (Run #${PREV_RUN}) → ${ENV^^} (Run #${{ github.run_number }})"
-          fi
+          [ "$ENV" = "$BASELINE_ENV" ] \
+            && COMPARING="Same-Env: ${ENV^^} Run #${{ github.run_number }}" \
+            || COMPARING="Cross-Env: ${BASELINE_ENV^^} → ${ENV^^} Run #${{ github.run_number }}"
 
-          # Exec errors block — grouped by category, count + one sample per type
-          if [ "$EXEC_ERROR_COUNT" -gt 0 ] && [ -n "$EXEC_SUMMARY" ]; then
-            EXEC_BLOCK=$(jq -n \
-              --arg summary "$EXEC_SUMMARY" \
-              --arg run_url "$RUN_URL" \
-              --arg run_num "${{ github.run_number }}" \
-              '{type:"section",text:{type:"mrkdwn",text:("*Execution Errors:*\n```"+$summary+"```\n<"+$run_url+"|View full logs → Run #"+$run_num+">")}}')
-          else
-            EXEC_BLOCK="null"
-          fi
+          BREAKDOWN="✅ ${{ env.PASSED_COUNT }} passed"
+          [ "${{ env.SKIPPED_COUNT }}" -gt 0 ]     && BREAKDOWN="$BREAKDOWN  ·  ⏭ ${{ env.SKIPPED_COUNT }} skipped"
+          [ "${{ env.VISUAL_FAIL_COUNT }}" -gt 0 ] && BREAKDOWN="$BREAKDOWN  ·  ❌ ${{ env.VISUAL_FAIL_COUNT }} visual diffs"
+          [ "${{ env.EXEC_ERROR_COUNT }}" -gt 0 ]  && BREAKDOWN="$BREAKDOWN  ·  ⚠️ ${{ env.EXEC_ERROR_COUNT }} exec errors"
 
           PAYLOAD=$(jq -n \
-            --arg icon "$ICON" --arg comparing "$COMPARING" --arg status_label "$STATUS_LABEL" \
-            --arg color "$COLOR" \
-            --arg status_field "${ICON} ${STATUS_LABEL}" --arg env_field "${ENV^^}" \
-            --arg duration "$DURATION" --arg report_url "$REPORT_URL" \
-            --arg run_url "$RUN_URL" --arg run_num "${{ github.run_number }}" \
-            --arg has_diffs "$HAS_VISUAL_DIFFS" \
-            --argjson exec_block "$EXEC_BLOCK" \
+            --arg icon       "$ICON"            \
+            --arg comparing  "$COMPARING"        \
+            --arg status     "$STATUS_LABEL"     \
+            --arg color      "$COLOR"            \
+            --arg env_field  "${ENV^^}"          \
+            --arg duration   "$DURATION"         \
+            --arg matrix     "$MATRIX_LABEL"     \
+            --arg breakdown  "$BREAKDOWN"        \
+            --arg report_url "$REPORT_URL"       \
+            --arg run_url    "$RUN_URL"          \
+            --arg run_num    "${{ github.run_number }}" \
             '{
-              text: ($icon+" Cross-Browser Visual — "+$comparing+" — "+$status_label),
+              text: ($icon + " Cross-Browser Visual — " + $comparing + " — " + $status),
               attachments: [{
                 color: $color,
-                blocks: (
-                  [
-                    { type:"header", text:{ type:"plain_text", text:"🌐 Cross-Browser Visual Report", emoji:true } },
-                    { type:"section", fields:[
-                        { type:"mrkdwn", text:("*Comparing*\n`"+$comparing+"`") },
-                        { type:"mrkdwn", text:("*Status*\n"+$status_field) },
-                        { type:"mrkdwn", text:("*Test Env*\n`"+$env_field+"`") },
-                        { type:"mrkdwn", text:("*Duration*\n"+$duration) }
-                    ]},
-                    { type:"section", text:{ type:"mrkdwn", text:"*Matrix*\nChrome · Firefox · Safari  ×  Desktop · Tablet · Mobile" } }
-                  ]
-                  + (if $exec_block != null then [$exec_block] else [] end)
-                  + [{
-                    type:"actions",
-                    elements:(
-                      (if ($has_diffs=="true" and $report_url!="") then
-                        [{ type:"button", text:{type:"plain_text",text:"📊 View HTML Report",emoji:true}, url:$report_url, style:"primary" }]
-                      else [] end)
-                      + [{ type:"button", text:{type:"plain_text",text:("⚙️ View Run #"+$run_num),emoji:true}, url:$run_url }]
-                    )
-                  }]
-                )
+                blocks: [
+                  { type: "header",
+                    text: { type: "plain_text",
+                            text: "🌐 Cross-Browser Visual · Parallel (9 runners)", emoji: true }},
+                  { type: "section", fields: [
+                      { type: "mrkdwn", text: ("*Comparing*\n`"  + $comparing + "`") },
+                      { type: "mrkdwn", text: ("*Status*\n"      + $icon + " " + $status) },
+                      { type: "mrkdwn", text: ("*Test Env*\n`"   + $env_field + "`") },
+                      { type: "mrkdwn", text: ("*Duration*\n"    + $duration) }
+                  ]},
+                  { type: "section",
+                    text: { type: "mrkdwn", text: ("*Matrix*\n" + $matrix) }},
+                  { type: "section",
+                    text: { type: "mrkdwn", text: $breakdown }},
+                  { type: "actions", elements: [
+                      { type: "button",
+                        text: { type: "plain_text", text: "📊 HTML Report", emoji: true },
+                        url: $report_url, style: "primary" },
+                      { type: "button",
+                        text: { type: "plain_text",
+                                text: ("⚙️ Run #" + $run_num), emoji: true },
+                        url: $run_url }
+                  ]}
+                ]
               }]
             }')
 
@@ -430,20 +456,17 @@ jobs:
             -H 'Content-Type: application/json' \
             -d "$PAYLOAD"
 
-      # ── GitHub Actions job summary ────────────────────────────────────────
+      # ── Job summary ───────────────────────────────────────────────────────
       - name: Job summary
         if: always()
         run: |
           ENV="${{ env.TEST_ENV }}"
           BASELINE_ENV="${{ env.BASELINE_ENV }}"
-          PREV_RUN="${{ env.PREV_RUN }}"
-          PREV_DATE="${{ env.PREV_DATE }}"
-          BASELINE_FOUND="${{ env.BASELINE_FOUND }}"
-          VALIDATION_MODE="${{ env.VALIDATION_MODE }}"
+          BROWSERS="${{ github.event.inputs.browsers || 'all' }}"
           REPORT_URL="${{ steps.cf-deploy.outputs.alias || steps.cf-deploy.outputs.url }}"
 
           case "$ENV" in
-            dev)  BASE_URL="https://drupal.dev.energysafetycanada.com" ;;
+            dev)  BASE_URL="https://drupal.dev.energysafetycanada.com"  ;;
             test) BASE_URL="https://drupal.test.energysafetycanada.com" ;;
             uat)  BASE_URL="https://drupal.uat.energysafetycanada.com"  ;;
             beta) BASE_URL="https://beta.energysafetycanada.com"        ;;
@@ -451,40 +474,191 @@ jobs:
             *)    BASE_URL="$ENV" ;;
           esac
 
-          if [ "$BASELINE_FOUND" = "false" ]; then
-            [ "$VALIDATION_MODE" = "cross-env" ] \
-              && COMPARING="⚠️ No \`${BASELINE_ENV^^}\` baseline — run it first" \
-              || COMPARING="📸 First Run — baseline created for \`${ENV^^}\`"
-          elif [ "$VALIDATION_MODE" = "cross-env" ]; then
-            COMPARING="🔀 Cross-Env: \`${BASELINE_ENV^^}\` Run #${PREV_RUN} (${PREV_DATE}) → \`${ENV^^}\` Run #${{ github.run_number }}"
-          else
-            COMPARING="🔁 Same-Env: \`${BASELINE_ENV^^}\` Run #${PREV_RUN} (${PREV_DATE}) → \`${ENV^^}\` Run #${{ github.run_number }}"
-          fi
+          [ "$ENV" = "$BASELINE_ENV" ] \
+            && COMPARING="🔁 Same-Env: \`${ENV^^}\` Run #${{ github.run_number }}" \
+            || COMPARING="🔀 Cross-Env: \`${BASELINE_ENV^^}\` → \`${ENV^^}\` Run #${{ github.run_number }}"
+
+          case "$BROWSERS" in
+            chromium-only) MATRIX_LABEL="Chrome · Desktop · Tablet · Mobile (3 shards)" ;;
+            firefox-only)  MATRIX_LABEL="Firefox · Desktop · Tablet · Mobile (3 shards)" ;;
+            webkit-only)   MATRIX_LABEL="Safari · Desktop · Tablet · Mobile (3 shards)"  ;;
+            *) MATRIX_LABEL="Chrome + Firefox + Safari × Desktop + Tablet + Mobile — **9 parallel runners**" ;;
+          esac
 
           {
-            echo "## Cross-Browser Visual Report"
+            echo "## Cross-Browser Visual · Parallel Execution"
             echo "| | |"
             echo "|---|---|"
-            echo "| **Mode**             | ${{ env.VALIDATION_MODE }} |"
             echo "| **Comparing**        | ${COMPARING} |"
             echo "| **Test environment** | \`${ENV^^}\` |"
             echo "| **Baseline env**     | \`${BASELINE_ENV^^}\` |"
             echo "| **Base URL**         | ${BASE_URL} |"
-            echo "| **Browsers**         | Chrome · Firefox · Safari |"
-            echo "| **Viewports**        | Desktop 1440×900 · Tablet iPad Pro 11 · Mobile Pixel 7 / iPhone 14 |"
+            echo "| **Matrix**           | ${MATRIX_LABEL} |"
             echo "| **Passed**           | ${{ env.PASSED_COUNT }} |"
+            echo "| **Skipped**          | ${{ env.SKIPPED_COUNT }} |"
             echo "| **Visual diffs**     | ${{ env.VISUAL_FAIL_COUNT }} |"
             echo "| **Execution errors** | ${{ env.EXEC_ERROR_COUNT }} |"
             echo "| **Run**              | [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) |"
             [ -n "$REPORT_URL" ] && echo "| **HTML Report**      | [$REPORT_URL]($REPORT_URL) |"
           } >> $GITHUB_STEP_SUMMARY
 
-      # ── Save baseline ─────────────────────────────────────────────────────
-      - name: Save baseline
+      # ─────────────────────────────────────────────────────────────────────
+      # Baseline saving
+      # Each browser baseline is updated with:
+      #   (a) snapshot-delta: new baselines from --update-snapshots=missing
+      #   (b) test-actuals:   roll-forward of changed pages' actual screenshots
+      # We run this AFTER reporting so deploy/Slack are never blocked by it.
+      # ─────────────────────────────────────────────────────────────────────
+
+      # ── Download all snapshot deltas (new baselines only) ─────────────────
+      - name: Download snapshot deltas
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          pattern:        snapshot-delta-*
+          path:           all-deltas/
+          merge-multiple: false   # keep per-browser-shard subdirs
+
+      # ── Download all actual screenshots from failing tests ────────────────
+      - name: Download test actuals
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          pattern:        test-actuals-*
+          path:           all-actuals/
+          merge-multiple: false   # keep per-browser-shard subdirs
+
+      # ── Download existing baselines (one per browser) ─────────────────────
+      - name: Download baseline (chromium)
+        uses: dawidd6/action-download-artifact@v6
+        continue-on-error: true
+        with:
+          name:             visual-cb-baseline-${{ env.BASELINE_ENV }}-chromium
+          path:             downloaded-baseline-chromium/
+          workflow:         visual-cross-browser.yml
+          search_artifacts: true
+
+      - name: Download baseline (firefox)
+        uses: dawidd6/action-download-artifact@v6
+        continue-on-error: true
+        with:
+          name:             visual-cb-baseline-${{ env.BASELINE_ENV }}-firefox
+          path:             downloaded-baseline-firefox/
+          workflow:         visual-cross-browser.yml
+          search_artifacts: true
+
+      - name: Download baseline (webkit)
+        uses: dawidd6/action-download-artifact@v6
+        continue-on-error: true
+        with:
+          name:             visual-cb-baseline-${{ env.BASELINE_ENV }}-webkit
+          path:             downloaded-baseline-webkit/
+          workflow:         visual-cross-browser.yml
+          search_artifacts: true
+
+      # ── Merge all updates into each browser's baseline ────────────────────
+      - name: Merge and save baselines
+        if: always()
+        run: |
+          BROWSERS_INPUT="${{ github.event.inputs.browsers || 'all' }}"
+          TEST_ENV="${{ env.TEST_ENV }}"
+
+          for BROWSER in chromium firefox webkit; do
+            # Skip browsers that weren't part of this run
+            if [ "$BROWSERS_INPUT" != "all" ] && [ "$BROWSERS_INPUT" != "${BROWSER}-only" ]; then
+              echo "── Skipping $BROWSER baseline (not tested this run)"
+              continue
+            fi
+
+            echo "── Processing $BROWSER baseline ──────────────────────────"
+            FINAL="baseline-final/${BROWSER}"
+            mkdir -p "$FINAL"
+
+            # Start from the downloaded baseline
+            SRC="downloaded-baseline-${BROWSER}"
+            if [ -d "$SRC" ] && [ "$(find "$SRC" -name '*.png' | wc -l)" -gt 0 ]; then
+              cp -r "$SRC/." "$FINAL/"
+              echo "  Copied $(find "$SRC" -name '*.png' | wc -l) existing baseline files"
+            else
+              echo "  No existing baseline — starting fresh"
+            fi
+
+            # (a) Apply new snapshots from all shards (created for missing baselines)
+            NEW_TOTAL=0
+            for SHARD in 1 2 3; do
+              DELTA="all-deltas/snapshot-delta-${BROWSER}-${SHARD}"
+              [ -d "$DELTA" ] || continue
+
+              (cd "$DELTA" && find . -name '*.png') | while IFS= read -r rel; do
+                rel="${rel#./}"
+                target_dir="${FINAL}/$(dirname "$rel")"
+                mkdir -p "$target_dir"
+                cp "${DELTA}/${rel}" "${target_dir}/"
+              done
+              COUNT=$(find "$DELTA" -name '*.png' 2>/dev/null | wc -l | tr -d ' ')
+              [ "$COUNT" -gt 0 ] && echo "  Shard $SHARD: added $COUNT new snapshot(s)"
+              NEW_TOTAL=$((NEW_TOTAL + COUNT))
+            done
+            [ "$NEW_TOTAL" -gt 0 ] && echo "  Total new snapshots: $NEW_TOTAL"
+
+            # (b) Roll baseline forward: apply actual screenshots over existing baseline
+            ROLLED=0
+            for SHARD in 1 2 3; do
+              ACTUALS_DIR="all-actuals/test-actuals-${BROWSER}-${SHARD}"
+              [ -d "$ACTUALS_DIR" ] || continue
+
+              while IFS= read -r actual; do
+                snapname=$(basename "$actual" | sed 's/-actual\.png$/.png/')
+                snapshot=$(find "$FINAL" -name "$snapname" 2>/dev/null | head -1)
+                if [ -n "$snapshot" ]; then
+                  cp "$actual" "$snapshot"
+                  ROLLED=$((ROLLED + 1))
+                fi
+              done < <(find "$ACTUALS_DIR" -name '*.png' 2>/dev/null)
+            done
+            echo "  Rolled forward: $ROLLED screenshot(s)"
+
+            # Write metadata
+            cat > "${FINAL}/baseline-meta.json" <<EOF
+          {
+            "env":        "${TEST_ENV}",
+            "browser":    "${BROWSER}",
+            "run_number": "${{ github.run_number }}",
+            "run_id":     "${{ github.run_id }}",
+            "branch":     "${{ github.ref_name }}",
+            "date":       "$(date -u '+%Y-%m-%d %H:%M UTC')"
+          }
+          EOF
+            echo "  Done."
+          done
+
+      # ── Save updated baselines ────────────────────────────────────────────
+      - name: Save baseline (chromium)
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name:           visual-cb-baseline-${{ env.TEST_ENV }}
-          path:           snapshots/
-          retention-days: 3
-          overwrite:      true
+          name:            visual-cb-baseline-${{ env.TEST_ENV }}-chromium
+          path:            baseline-final/chromium/
+          retention-days:  3
+          overwrite:       true
+          if-no-files-found: ignore
+
+      - name: Save baseline (firefox)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name:            visual-cb-baseline-${{ env.TEST_ENV }}-firefox
+          path:            baseline-final/firefox/
+          retention-days:  3
+          overwrite:       true
+          if-no-files-found: ignore
+
+      - name: Save baseline (webkit)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name:            visual-cb-baseline-${{ env.TEST_ENV }}-webkit
+          path:            baseline-final/webkit/
+          retention-days:  3
+          overwrite:       true
+          if-no-files-found: ignore
