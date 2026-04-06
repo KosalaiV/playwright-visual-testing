@@ -19,12 +19,18 @@ name: Visual Cross-Browser
 #                    │
 #            merge-and-report   ← combines 9 blob reports → HTML → Cloudflare
 #
+# Why compute-matrix exists:
+#   GitHub Actions does not allow `matrix.browser` in a job-level `if`.
+#   Instead, a compute-matrix job builds the browser list from the `browsers`
+#   input and the test job uses fromJson() on that output — so only the
+#   selected browser(s) actually spin up runners.
+#
 # Baseline isolation:
 #   Each browser has its own artifact: visual-cb-baseline-<env>-<browser>
 #   Merge job applies:
-#     (a) new snapshots (from --update-snapshots=missing) from all 3 shards
-#     (b) roll-forward actuals (diff screenshots) from all 3 shards
-#   This ensures ALL changed pages — not just shard-1's — get rolled forward.
+#     (a) snapshot-delta  — new baselines from --update-snapshots=missing
+#     (b) test-actuals    — roll-forward of changed pages' actual screenshots
+#   All 3 shards' changes are applied so every changed page gets rolled forward.
 # ─────────────────────────────────────────────────────────────────────────────
 
 on:
@@ -57,7 +63,6 @@ permissions:
 env:
   TEST_ENV:     ${{ github.event.inputs.environment || 'uat' }}
   BASELINE_ENV: ${{ github.event.inputs.baseline_env || github.event.inputs.environment || 'uat' }}
-  TOTAL_SHARDS: 3
 
 # ─────────────────────────────────────────────────────────────────────────────
 jobs:
@@ -71,38 +76,34 @@ jobs:
       - id: t
         run: echo "time=$(date +%s)" >> $GITHUB_OUTPUT
 
+  # ── Build browser list from the `browsers` input ──────────────────────────
+  # GitHub Actions does not allow `matrix.browser` in a job-level `if`, so we
+  # derive the browser list here and pass it via fromJson() to the test matrix.
+  compute-matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      browsers: ${{ steps.set.outputs.browsers }}
+    steps:
+      - id: set
+        run: |
+          case "${{ github.event.inputs.browsers || 'all' }}" in
+            chromium-only) echo 'browsers=["chromium"]'                    >> $GITHUB_OUTPUT ;;
+            firefox-only)  echo 'browsers=["firefox"]'                     >> $GITHUB_OUTPUT ;;
+            webkit-only)   echo 'browsers=["webkit"]'                      >> $GITHUB_OUTPUT ;;
+            *)             echo 'browsers=["chromium","firefox","webkit"]'  >> $GITHUB_OUTPUT ;;
+          esac
+
   # ── 9 parallel shard jobs ─────────────────────────────────────────────────
   test:
-    name: "${{ matrix.browser }} · shard ${{ matrix.shard }}/${{ strategy.job-total }}"
+    name: "${{ matrix.browser }} · shard ${{ matrix.shard }}/3"
     runs-on: ubuntu-latest
-    needs: record-start
-
-    if: |
-      github.event.inputs.browsers == 'all' ||
-      github.event.inputs.browsers == '' ||
-      github.event.inputs.browsers == format('{0}-only', matrix.browser)
+    needs: [record-start, compute-matrix]
 
     strategy:
       fail-fast: false
       matrix:
-        browser: [chromium, firefox, webkit]
+        browser: ${{ fromJson(needs.compute-matrix.outputs.browsers) }}
         shard:   [1, 2, 3]
-        include:
-          - browser: chromium
-            projects: >-
-              --project=desktop-chromium
-              --project=tablet-chromium
-              --project=mobile-chromium
-          - browser: firefox
-            projects: >-
-              --project=desktop-firefox
-              --project=tablet-firefox
-              --project=mobile-firefox
-          - browser: webkit
-            projects: >-
-              --project=desktop-webkit
-              --project=tablet-webkit
-              --project=mobile-webkit
 
     steps:
 
@@ -118,6 +119,19 @@ jobs:
 
       # Install only this job's browser engine — saves 3-4 min vs all three
       - run: npx playwright install ${{ matrix.browser }} --with-deps
+
+      # ── Derive --project flags from browser name ──────────────────────────
+      # (cannot use matrix `include` because the browser list is dynamic)
+      - name: Set project flags
+        run: |
+          case "${{ matrix.browser }}" in
+            chromium)
+              echo "PROJECTS=--project=desktop-chromium --project=tablet-chromium --project=mobile-chromium" >> $GITHUB_ENV ;;
+            firefox)
+              echo "PROJECTS=--project=desktop-firefox --project=tablet-firefox --project=mobile-firefox" >> $GITHUB_ENV ;;
+            webkit)
+              echo "PROJECTS=--project=desktop-webkit --project=tablet-webkit --project=mobile-webkit" >> $GITHUB_ENV ;;
+          esac
 
       # ── Download browser-specific baseline ───────────────────────────────
       - name: Clear local snapshots
@@ -142,10 +156,7 @@ jobs:
             echo "No baseline found — first run for ${{ matrix.browser }}"
           fi
 
-      # ── Record existing snapshot names (for delta detection later) ───────
-      # We only upload snapshots that are NEW this run (created by
-      # --update-snapshots=missing for pages that had no baseline yet).
-      # This keeps the artifact tiny on subsequent runs.
+      # ── Record pre-run snapshot list (for delta detection after tests) ────
       - name: Record pre-run snapshot list
         run: |
           find snapshots -name '*.png' | sed 's|^snapshots/||' | sort \
@@ -179,13 +190,14 @@ jobs:
           CONTENTEDITOR_PASSWORD: ${{ secrets.CONTENTEDITOR_PASSWORD }}
         run: |
           TEST_ENV=${{ env.TEST_ENV }} npx playwright test esc.visual esc.portal \
-            ${{ matrix.projects }} \
+            $PROJECTS \
             --shard=${{ matrix.shard }}/3 \
             --workers=8 \
             --update-snapshots=missing \
             --reporter=blob,github,json
 
-      # ── Collect new snapshots (delta only — much smaller than full set) ──
+      # ── Collect only new snapshots (delta vs pre-run list) ───────────────
+      # Keeps the artifact small on normal runs — only new pages have deltas.
       - name: Collect snapshot delta
         if: always()
         run: |
@@ -200,8 +212,7 @@ jobs:
                 cp "snapshots/$rel" "$dest_dir/"
               done
 
-          NEW=$(find snapshot-delta -name '*.png' | wc -l | tr -d ' ')
-          echo "New snapshots this shard: $NEW"
+          echo "New snapshots this shard: $(find snapshot-delta -name '*.png' | wc -l)"
 
       # ── Collect actual screenshots from failing tests ─────────────────────
       - name: Collect test actuals
@@ -212,7 +223,7 @@ jobs:
             -exec cp {} test-actuals/ \; 2>/dev/null || true
           echo "Actuals: $(find test-actuals -name '*.png' | wc -l)"
 
-      # ── Upload artifacts for merge job ───────────────────────────────────
+      # ── Upload artifacts for the merge job ───────────────────────────────
       - name: Upload blob report
         if: always()
         uses: actions/upload-artifact@v4
@@ -248,11 +259,11 @@ jobs:
           retention-days:  1
           if-no-files-found: ignore
 
-  # ── Merge reports + aggregate stats + save baseline ──────────────────────
+  # ── Merge reports + aggregate stats + save baselines ─────────────────────
   merge-and-report:
     name: Merge · Report · Save Baseline
     runs-on: ubuntu-latest
-    needs: [record-start, test]
+    needs: [record-start, compute-matrix, test]
     if: always()
 
     steps:
@@ -265,9 +276,9 @@ jobs:
           cache: 'npm'
 
       - run: npm ci
-      # No browser binaries needed — merge-reports is a CLI-only command
+      # No browser binaries needed — merge-reports is CLI-only
 
-      # ── HTML report: download all 9 blob reports → merge ─────────────────
+      # ── HTML report: merge all blob reports ──────────────────────────────
       - name: Download blob reports
         uses: actions/download-artifact@v4
         continue-on-error: true
@@ -280,7 +291,7 @@ jobs:
         run: |
           BLOB_COUNT=$(find all-blobs -name '*.zip' 2>/dev/null | wc -l | tr -d ' ')
           if [ "$BLOB_COUNT" -gt 0 ]; then
-            echo "Merging $BLOB_COUNT blob(s) into HTML report…"
+            echo "Merging $BLOB_COUNT blob(s)…"
             npx playwright merge-reports \
               --reporter html \
               --output playwright-report \
@@ -292,7 +303,7 @@ jobs:
               > playwright-report/index.html
           fi
 
-      # ── Stats: download all 9 JSON results → sum ─────────────────────────
+      # ── Stats: aggregate all JSON results ────────────────────────────────
       - name: Download JSON results
         uses: actions/download-artifact@v4
         continue-on-error: true
@@ -341,21 +352,18 @@ jobs:
           echo "VISUAL_FAIL_COUNT=$TOTAL_VISUAL_FAIL" >> $GITHUB_ENV
           echo "EXEC_ERROR_COUNT=$TOTAL_EXEC_FAIL"    >> $GITHUB_ENV
           echo "TOTAL_FAIL_COUNT=$TOTAL_FAIL"         >> $GITHUB_ENV
-          echo "HAS_VISUAL_DIFFS=$([ "$TOTAL_VISUAL_FAIL" -gt 0 ] && echo true || echo false)" >> $GITHUB_ENV
 
           echo "────────────────────────────────────────────"
-          echo "  Browsers     : ${{ github.event.inputs.browsers || 'all' }}"
-          echo "  Shards       : 3 per browser (9 runners total)"
-          echo "  Passed       : $TOTAL_PASSED"
-          echo "  Skipped      : $TOTAL_SKIPPED"
-          echo "  Visual diffs : $TOTAL_VISUAL_FAIL"
-          echo "  Exec errors  : $TOTAL_EXEC_FAIL"
-          echo "  Total failed : $TOTAL_FAIL"
+          echo "  Browsers selected : ${{ github.event.inputs.browsers || 'all' }}"
+          echo "  Shards per browser: 3  (runners total: $(echo '${{ needs.compute-matrix.outputs.browsers }}' | jq 'length * 3'))"
+          echo "  Passed            : $TOTAL_PASSED"
+          echo "  Skipped           : $TOTAL_SKIPPED"
+          echo "  Visual diffs      : $TOTAL_VISUAL_FAIL"
+          echo "  Exec errors       : $TOTAL_EXEC_FAIL"
+          echo "  Total failed      : $TOTAL_FAIL"
           echo "────────────────────────────────────────────"
 
-      # ── Deploy HTML report ────────────────────────────────────────────────
-      # Always deployed so teams can review baseline captures, skipped tests,
-      # and visual diffs — not just when failures exist.
+      # ── Deploy HTML report (always — teams need to see baseline captures) ─
       - name: Deploy HTML report
         if: always()
         id: cf-deploy
@@ -387,15 +395,15 @@ jobs:
           DURATION="$(( ELAPSED / 60 ))m $(( ELAPSED % 60 ))s"
 
           case "$BROWSERS" in
-            chromium-only) MATRIX_LABEL="Chrome · D·T·M · 3 shards" ;;
-            firefox-only)  MATRIX_LABEL="Firefox · D·T·M · 3 shards" ;;
-            webkit-only)   MATRIX_LABEL="Safari · D·T·M · 3 shards" ;;
-            *)             MATRIX_LABEL="Chrome+Firefox+Safari × Desktop+Tablet+Mobile · 9 runners" ;;
+            chromium-only) MATRIX_LABEL="Chrome · Desktop+Tablet+Mobile · 3 shards" ;;
+            firefox-only)  MATRIX_LABEL="Firefox · Desktop+Tablet+Mobile · 3 shards" ;;
+            webkit-only)   MATRIX_LABEL="Safari · Desktop+Tablet+Mobile · 3 shards" ;;
+            *)             MATRIX_LABEL="Chrome+Firefox+Safari × Desktop+Tablet+Mobile — 9 runners" ;;
           esac
 
-          TOTAL_FAIL_COUNT="${{ env.TOTAL_FAIL_COUNT }}"
-          if [ "$TOTAL_FAIL_COUNT" -gt 0 ]; then
-            ICON="❌"; COLOR="#ef4444"; STATUS_LABEL="${TOTAL_FAIL_COUNT} test(s) failed"
+          TOTAL_FAIL="${{ env.TOTAL_FAIL_COUNT }}"
+          if [ "$TOTAL_FAIL" -gt 0 ]; then
+            ICON="❌"; COLOR="#ef4444"; STATUS_LABEL="${TOTAL_FAIL} test(s) failed"
           else
             ICON="✅"; COLOR="#22c55e"; STATUS_LABEL="All tests passed"
           fi
@@ -428,7 +436,7 @@ jobs:
                 blocks: [
                   { type: "header",
                     text: { type: "plain_text",
-                            text: "🌐 Cross-Browser Visual · Parallel (9 runners)", emoji: true }},
+                            text: "🌐 Cross-Browser Visual · Parallel", emoji: true }},
                   { type: "section", fields: [
                       { type: "mrkdwn", text: ("*Comparing*\n`"  + $comparing + "`") },
                       { type: "mrkdwn", text: ("*Status*\n"      + $icon + " " + $status) },
@@ -479,10 +487,10 @@ jobs:
             || COMPARING="🔀 Cross-Env: \`${BASELINE_ENV^^}\` → \`${ENV^^}\` Run #${{ github.run_number }}"
 
           case "$BROWSERS" in
-            chromium-only) MATRIX_LABEL="Chrome · Desktop · Tablet · Mobile (3 shards)" ;;
-            firefox-only)  MATRIX_LABEL="Firefox · Desktop · Tablet · Mobile (3 shards)" ;;
-            webkit-only)   MATRIX_LABEL="Safari · Desktop · Tablet · Mobile (3 shards)"  ;;
-            *) MATRIX_LABEL="Chrome + Firefox + Safari × Desktop + Tablet + Mobile — **9 parallel runners**" ;;
+            chromium-only) MATRIX_LABEL="Chrome · Desktop · Tablet · Mobile · 3 shards" ;;
+            firefox-only)  MATRIX_LABEL="Firefox · Desktop · Tablet · Mobile · 3 shards" ;;
+            webkit-only)   MATRIX_LABEL="Safari · Desktop · Tablet · Mobile · 3 shards"  ;;
+            *)             MATRIX_LABEL="Chrome + Firefox + Safari × Desktop + Tablet + Mobile — **9 parallel runners**" ;;
           esac
 
           {
@@ -503,32 +511,31 @@ jobs:
           } >> $GITHUB_STEP_SUMMARY
 
       # ─────────────────────────────────────────────────────────────────────
-      # Baseline saving
-      # Each browser baseline is updated with:
-      #   (a) snapshot-delta: new baselines from --update-snapshots=missing
-      #   (b) test-actuals:   roll-forward of changed pages' actual screenshots
-      # We run this AFTER reporting so deploy/Slack are never blocked by it.
+      # Baseline saving (runs after reporting so deploy/Slack are never blocked)
+      #
+      # For each browser that was tested:
+      #   1. Download the existing baseline artifact
+      #   2. Apply snapshot-delta from all 3 shards  (new pages)
+      #   3. Apply test-actuals from all 3 shards    (roll-forward changed pages)
+      #   4. Save updated baseline
       # ─────────────────────────────────────────────────────────────────────
 
-      # ── Download all snapshot deltas (new baselines only) ─────────────────
       - name: Download snapshot deltas
         uses: actions/download-artifact@v4
         continue-on-error: true
         with:
           pattern:        snapshot-delta-*
           path:           all-deltas/
-          merge-multiple: false   # keep per-browser-shard subdirs
+          merge-multiple: false
 
-      # ── Download all actual screenshots from failing tests ────────────────
       - name: Download test actuals
         uses: actions/download-artifact@v4
         continue-on-error: true
         with:
           pattern:        test-actuals-*
           path:           all-actuals/
-          merge-multiple: false   # keep per-browser-shard subdirs
+          merge-multiple: false
 
-      # ── Download existing baselines (one per browser) ─────────────────────
       - name: Download baseline (chromium)
         uses: dawidd6/action-download-artifact@v6
         continue-on-error: true
@@ -556,57 +563,50 @@ jobs:
           workflow:         visual-cross-browser.yml
           search_artifacts: true
 
-      # ── Merge all updates into each browser's baseline ────────────────────
-      - name: Merge and save baselines
+      - name: Merge and update baselines
         if: always()
         run: |
-          BROWSERS_INPUT="${{ github.event.inputs.browsers || 'all' }}"
           TEST_ENV="${{ env.TEST_ENV }}"
+          # Only process browsers that were actually tested this run
+          BROWSERS_JSON='${{ needs.compute-matrix.outputs.browsers }}'
+          BROWSERS=$(echo "$BROWSERS_JSON" | jq -r '.[]')
 
-          for BROWSER in chromium firefox webkit; do
-            # Skip browsers that weren't part of this run
-            if [ "$BROWSERS_INPUT" != "all" ] && [ "$BROWSERS_INPUT" != "${BROWSER}-only" ]; then
-              echo "── Skipping $BROWSER baseline (not tested this run)"
-              continue
-            fi
-
-            echo "── Processing $BROWSER baseline ──────────────────────────"
+          for BROWSER in $BROWSERS; do
+            echo "── $BROWSER ──────────────────────────────────────────────"
             FINAL="baseline-final/${BROWSER}"
             mkdir -p "$FINAL"
 
-            # Start from the downloaded baseline
+            # 1. Start from the downloaded baseline
             SRC="downloaded-baseline-${BROWSER}"
-            if [ -d "$SRC" ] && [ "$(find "$SRC" -name '*.png' | wc -l)" -gt 0 ]; then
+            if [ -d "$SRC" ] && [ "$(find "$SRC" -name '*.png' 2>/dev/null | wc -l)" -gt 0 ]; then
               cp -r "$SRC/." "$FINAL/"
-              echo "  Copied $(find "$SRC" -name '*.png' | wc -l) existing baseline files"
+              echo "  Copied $(find "$SRC" -name '*.png' | wc -l) baseline files"
             else
               echo "  No existing baseline — starting fresh"
             fi
 
-            # (a) Apply new snapshots from all shards (created for missing baselines)
+            # 2. Apply snapshot delta from all 3 shards (new pages only)
             NEW_TOTAL=0
             for SHARD in 1 2 3; do
               DELTA="all-deltas/snapshot-delta-${BROWSER}-${SHARD}"
               [ -d "$DELTA" ] || continue
-
+              COUNT=$(find "$DELTA" -name '*.png' 2>/dev/null | wc -l | tr -d ' ')
+              [ "$COUNT" -eq 0 ] && continue
               (cd "$DELTA" && find . -name '*.png') | while IFS= read -r rel; do
                 rel="${rel#./}"
-                target_dir="${FINAL}/$(dirname "$rel")"
-                mkdir -p "$target_dir"
-                cp "${DELTA}/${rel}" "${target_dir}/"
+                mkdir -p "${FINAL}/$(dirname "$rel")"
+                cp "${DELTA}/${rel}" "${FINAL}/${rel}"
               done
-              COUNT=$(find "$DELTA" -name '*.png' 2>/dev/null | wc -l | tr -d ' ')
-              [ "$COUNT" -gt 0 ] && echo "  Shard $SHARD: added $COUNT new snapshot(s)"
+              echo "  Shard $SHARD delta: $COUNT new snapshot(s)"
               NEW_TOTAL=$((NEW_TOTAL + COUNT))
             done
-            [ "$NEW_TOTAL" -gt 0 ] && echo "  Total new snapshots: $NEW_TOTAL"
+            [ "$NEW_TOTAL" -eq 0 ] && echo "  No new snapshots (all baselines already existed)"
 
-            # (b) Roll baseline forward: apply actual screenshots over existing baseline
+            # 3. Roll baseline forward with actual screenshots from all 3 shards
             ROLLED=0
             for SHARD in 1 2 3; do
-              ACTUALS_DIR="all-actuals/test-actuals-${BROWSER}-${SHARD}"
-              [ -d "$ACTUALS_DIR" ] || continue
-
+              ACTUALS="all-actuals/test-actuals-${BROWSER}-${SHARD}"
+              [ -d "$ACTUALS" ] || continue
               while IFS= read -r actual; do
                 snapname=$(basename "$actual" | sed 's/-actual\.png$/.png/')
                 snapshot=$(find "$FINAL" -name "$snapname" 2>/dev/null | head -1)
@@ -614,11 +614,11 @@ jobs:
                   cp "$actual" "$snapshot"
                   ROLLED=$((ROLLED + 1))
                 fi
-              done < <(find "$ACTUALS_DIR" -name '*.png' 2>/dev/null)
+              done < <(find "$ACTUALS" -name '*.png' 2>/dev/null)
             done
             echo "  Rolled forward: $ROLLED screenshot(s)"
 
-            # Write metadata
+            # 4. Write metadata
             cat > "${FINAL}/baseline-meta.json" <<EOF
           {
             "env":        "${TEST_ENV}",
@@ -629,10 +629,9 @@ jobs:
             "date":       "$(date -u '+%Y-%m-%d %H:%M UTC')"
           }
           EOF
-            echo "  Done."
+            echo "  Saved."
           done
 
-      # ── Save updated baselines ────────────────────────────────────────────
       - name: Save baseline (chromium)
         if: always()
         uses: actions/upload-artifact@v4
