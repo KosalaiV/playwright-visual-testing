@@ -294,7 +294,6 @@ jobs:
             echo "Merging $BLOB_COUNT blob(s)…"
             npx playwright merge-reports \
               --reporter html \
-              --output playwright-report \
               ./all-blobs
           else
             echo "No blob reports — creating placeholder"
