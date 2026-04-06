@@ -117,8 +117,10 @@ jobs:
 
       - run: npm ci
 
-      # Install only this job's browser engine — saves 3-4 min vs all three
-      - run: npx playwright install ${{ matrix.browser }} --with-deps
+      # Always install Chromium (required by global-setup.ts which calls chromium.launch()
+      # for auth state creation — regardless of which browser shard is running).
+      # Then install the shard's own browser for the actual visual tests.
+      - run: npx playwright install chromium ${{ matrix.browser }} --with-deps
 
       # ── Derive --project flags from browser name ──────────────────────────
       # (cannot use matrix `include` because the browser list is dynamic)
