@@ -98,15 +98,23 @@ export default defineConfig({
       name: 'desktop-chromium',
       use: { ...devices['Desktop Chrome'],   viewport: { width: 1440, height: 900 } },
     },
-    // Tablet: iPad Pro 11 — touch enabled, iPad UA, 834×1194 @ 2x DPR
+    // Tablet: iPad Mini — 768×1024 @ 2x DPR, touch, iPad UA
+    // NOTE: devices['iPad Mini'] sets defaultBrowserType:'webkit' — override to chromium.
     {
       name: 'tablet-chromium',
-      use: { ...devices['iPad Pro 11'] },
+      use: { ...devices['iPad Mini'], defaultBrowserType: 'chromium' },
     },
-    // Mobile: Pixel 7 — Android Chrome UA, 412×915 @ 2.625x DPR, touch
+    // Mobile: 375×812 — standard modern phone viewport (matches iPhone X CSS pixels)
+    // No Playwright Android preset exists at 375px, so we define it explicitly.
     {
       name: 'mobile-chromium',
-      use: { ...devices['Pixel 7'] },
+      use: {
+        viewport:          { width: 375, height: 812 },
+        deviceScaleFactor: 2,
+        isMobile:          true,
+        hasTouch:          true,
+        defaultBrowserType: 'chromium',
+      },
     },
 
     // ── Firefox (Gecko engine) ───────────────────────────────────────────────
@@ -115,16 +123,22 @@ export default defineConfig({
       name: 'desktop-firefox',
       use: { ...devices['Desktop Firefox'],  viewport: { width: 1440, height: 900 } },
     },
-    // Tablet: tablet-sized viewport on Gecko engine — uses Desktop Firefox UA
-    // (iPad Pro UA is Safari-specific; emulating it in Firefox produces inconsistent results)
+    // Tablet: 768×1024 on Gecko engine — uses Desktop Firefox UA
+    // (iPad UA is Safari-specific; emulating it in Firefox produces inconsistent results)
     {
       name: 'tablet-firefox',
-      use: { ...devices['Desktop Firefox'], viewport: { width: 834, height: 1194 } },
+      use: { ...devices['Desktop Firefox'], viewport: { width: 768, height: 1024 } },
     },
-    // Mobile: Pixel 7 characteristics (touch, DPR, viewport) on Gecko engine
+    // Mobile: 375×812 — matches the chromium and webkit mobile viewport exactly
     {
       name: 'mobile-firefox',
-      use: { ...devices['Pixel 7'] },
+      use: {
+        viewport:          { width: 375, height: 812 },
+        deviceScaleFactor: 2,
+        isMobile:          true,
+        hasTouch:          true,
+        defaultBrowserType: 'firefox',
+      },
     },
 
     // ── Safari (WebKit engine) ───────────────────────────────────────────────
@@ -133,15 +147,16 @@ export default defineConfig({
       name: 'desktop-webkit',
       use: { ...devices['Desktop Safari'],   viewport: { width: 1440, height: 900 } },
     },
-    // Tablet: iPad Pro 11 — real iPad Safari UA, touch, 2x DPR, on WebKit engine
+    // Tablet: iPad Mini — 768×1024 @ 2x DPR, real iPad Safari UA, touch
     {
       name: 'tablet-webkit',
-      use: { ...devices['iPad Pro 11'] },
+      use: { ...devices['iPad Mini'] },
     },
-    // Mobile: iPhone 14 — real iPhone Safari UA, touch, 3x DPR, 390×844
+    // Mobile: iPhone X — 375×812 @ 3x DPR, real iPhone Safari UA, touch
+    // Consistent viewport width with mobile-chromium and mobile-firefox.
     {
       name: 'mobile-webkit',
-      use: { ...devices['iPhone 14'] },
+      use: { ...devices['iPhone X'] },
     },
   ],
 });
